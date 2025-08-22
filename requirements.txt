@@ -1,14 +1,20 @@
 # Core FastAPI dependencies
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
+httpx==0.25.2
 
 # Data validation
 pydantic==2.5.0
 
-# Database and webhook processing
-sqlite3  # Built-in Python module
-hashlib  # Built-in Python module
+# Dhan integration
+dhanhq==1.0.0
 
 # Testing
 pytest==7.4.3
 pytest-asyncio==0.21.1
+
+# Code quality tools
+black==23.12.1
+flake8==7.0.0
+isort==5.13.2
+pre-commit==3.6.0

@@ -1,25 +1,14 @@
 services:
   - type: web
-    name: tradingview-dhan-system
+    name: tradingview-dhan-backend
     env: python
-    plan: starter
+    plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn backend.app.main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
       - key: WEBHOOK_TOKEN
-        sync: false
-      - key: ADMIN_TOKEN
-        sync: false
-      - key: DHAN_TOKEN
-        sync: false
-      - key: DRY_RUN
-        value: "true"
-      - key: NSE_API_KEY
-        sync: false
-      - key: NSE_API_SECRET
-        sync: false
-    healthCheckPath: /healthz
-    autoDeploy: false
-    branch: main
+        generateValue: true
+      - key: ALERT_DB_PATH
+        value: /opt/render/project/src/alerts.db

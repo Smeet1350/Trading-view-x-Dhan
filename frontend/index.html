@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TradingView x Dhan Trading System</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>TradingView x Dhan Trading System</h1>
+            <p>Phase 2: Webhook Integration & Idempotency</p>
+        </header>
+        
+        <main>
+            <section class="status-section">
+                <h2>System Status</h2>
+                <div class="status-grid">
+                    <div class="status-card">
+                        <h3>Backend API</h3>
+                        <div id="backend-status" class="status-indicator">Checking...</div>
+                    </div>
+                    <div class="status-card">
+                        <h3>Webhook Endpoint</h3>
+                        <div id="webhook-status" class="status-indicator">Checking...</div>
+                    </div>
+                    <div class="status-card">
+                        <h3>Database</h3>
+                        <div id="database-status" class="status-indicator">Checking...</div>
+                    </div>
+                </div>
+            </section>
+            
+            <section class="webhook-section">
+                <h2>Webhook Testing</h2>
+                <div class="webhook-form">
+                    <h3>Send Test Webhook</h3>
+                    <form id="webhook-form">
+                        <div class="form-group">
+                            <label for="webhook-id">Alert ID:</label>
+                            <input type="text" id="webhook-id" name="id" value="test-alert-001" required>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label for="webhook-symbol">Symbol:</label>
+                            <select id="webhook-symbol" name="symbol" required>
+                                <option value="NIFTY">NIFTY</option>
+                                <option value="BANKNIFTY">BANKNIFTY</option>
+                            </select>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label for="webhook-signal">Signal:</label>
+                            <select id="webhook-signal" name="signal" required>
+                                <option value="BUY CE">BUY CE</option>
+                                <option value="SELL CE">SELL CE</option>
+                                <option value="BUY PE">BUY PE</option>
+                                <option value="SELL PE">SELL PE</option>
+                            </select>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label for="webhook-timestamp">Timestamp:</label>
+                            <input type="datetime-local" id="webhook-timestamp" name="ts" required>
+                        </div>
+                        
+                        <button type="submit" class="btn btn-primary">Send Webhook</button>
+                    </form>
+                </div>
+                
+                <div class="webhook-results">
+                    <h3>Webhook Results</h3>
+                    <div id="webhook-results" class="results-container">
+                        <p>No webhooks sent yet.</p>
+                    </div>
+                </div>
+            </section>
+            
+            <section class="alerts-section">
+                <h2>Stored Alerts</h2>
+                <div class="alerts-container">
+                    <div id="alerts-list" class="alerts-list">
+                        <p>Loading alerts...</p>
+                    </div>
+                    <button id="refresh-alerts" class="btn btn-secondary">Refresh Alerts</button>
+                </div>
+            </section>
+        </main>
+        
+        <footer>
+            <p>&copy; 2024 TradingView x Dhan Trading System</p>
+        </footer>
+    </div>
+    
+    <script src="app.js"></script>
+</body>
+</html>

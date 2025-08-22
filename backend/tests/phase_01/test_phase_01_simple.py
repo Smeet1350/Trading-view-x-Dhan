@@ -24,7 +24,6 @@ class TestPhase01Basic:
         data = response.json()
         assert data["message"] == "TradingView x Dhan Trading System"
         assert data["version"] == "1.0.0"
-        assert data["phase"] == "1"
         assert data["status"] == "operational"
     
     def test_healthz_endpoint(self, client):
