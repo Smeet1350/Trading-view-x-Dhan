@@ -5,6 +5,10 @@ uvicorn[standard]==0.24.0
 # Data validation
 pydantic==2.5.0
 
+# Database and webhook processing
+sqlite3  # Built-in Python module
+hashlib  # Built-in Python module
+
 # Testing
 pytest==7.4.3
 pytest-asyncio==0.21.1
