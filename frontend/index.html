@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TradingView x Dhan Trading System</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>TradingView x Dhan Trading System</h1>
+            <p class="subtitle">Phase 0: Project Setup & Structure</p>
+        </header>
+        
+        <main>
+            <section class="status-section">
+                <h2>System Status</h2>
+                <div id="system-status" class="status-indicator">
+                    <span class="status-dot"></span>
+                    <span class="status-text">Checking...</span>
+                </div>
+            </section>
+            
+            <section class="endpoints-section">
+                <h2>API Endpoints</h2>
+                <div class="endpoint-grid">
+                    <div class="endpoint-card">
+                        <h3>/healthz</h3>
+                        <p>Health check endpoint</p>
+                        <button onclick="testEndpoint('/healthz')">Test</button>
+                        <div class="result" id="healthz-result"></div>
+                    </div>
+                    
+                    <div class="endpoint-card">
+                        <h3>/orders</h3>
+                        <p>Orders endpoint (Phase 0: empty)</p>
+                        <button onclick="testEndpoint('/orders')">Test</button>
+                        <div class="result" id="orders-result"></div>
+                    </div>
+                    
+                    <div class="endpoint-card">
+                        <h3>/</h3>
+                        <p>Root endpoint</p>
+                        <button onclick="testEndpoint('/')">Test</button>
+                        <div class="result" id="root-result"></div>
+                    </div>
+                </div>
+            </section>
+            
+            <section class="phase-info">
+                <h2>Development Phase</h2>
+                <div class="phase-card">
+                    <h3>Phase 0: Project Setup & Structure ✅</h3>
+                    <p>Basic project structure, FastAPI skeleton, and health endpoint implemented.</p>
+                    <ul>
+                        <li>✅ Project scaffold created</li>
+                        <li>✅ Dependencies configured</li>
+                        <li>✅ FastAPI application structure</li>
+                        <li>✅ Basic endpoints (/healthz, /orders, /)</li>
+                        <li>✅ CORS middleware configured</li>
+                        <li>✅ Test suite structure</li>
+                    </ul>
+                </div>
+            </section>
+        </main>
+        
+        <footer>
+            <p>Phase 0 Complete - Ready for Phase 1: FastAPI Skeleton & Health Endpoint</p>
+        </footer>
+    </div>
+    
+    <script src="app.js"></script>
+</body>
+</html>
