@@ -1,6 +1,6 @@
 /**
  * TradingView x Dhan Trading System - Frontend Application
- * Phase 0: Basic endpoint testing and status display
+ * Phase 1: Enhanced endpoint testing and comprehensive health monitoring
  */
 
 class TradingSystemDashboard {
@@ -23,7 +23,8 @@ class TradingSystemDashboard {
     
     async checkSystemStatus() {
         try {
-            const response = await fetch(`${this.baseUrl}/healthz`);
+            // Use enhanced health endpoint for better status monitoring
+            const response = await fetch(`${this.baseUrl}/health/simple`);
             const data = await response.json();
             
             const statusElement = document.getElementById('system-status');

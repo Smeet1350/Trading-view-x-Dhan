@@ -22,7 +22,7 @@ class TestPhase00Setup:
         # Verify main app can be imported
         assert app is not None
         assert app.title == "TradingView x Dhan Trading System"
-        assert app.version == "0.1.0"
+        assert app.version == "1.0.0"
 
     def test_health_endpoint(self, client: TestClient):
         """Test that /healthz endpoint returns correct response"""
@@ -30,7 +30,7 @@ class TestPhase00Setup:
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "ok"
-        assert data["phase"] == "0"
+        assert data["phase"] == "1"
 
     def test_root_endpoint(self, client: TestClient):
         """Test that root endpoint returns system information"""
@@ -38,16 +38,18 @@ class TestPhase00Setup:
         assert response.status_code == 200
         data = response.json()
         assert data["message"] == "TradingView x Dhan Trading System"
-        assert data["version"] == "0.1.0"
-        assert data["phase"] == "0"
-        assert data["status"] == "initialized"
+        assert data["version"] == "1.0.0"
+        assert data["phase"] == "1"
+        assert data["status"] == "operational"
 
     def test_orders_endpoint(self, client: TestClient):
-        """Test that /orders endpoint returns empty list in Phase 0"""
+        """Test that /orders endpoint returns empty list in Phase 1"""
         response = client.get("/orders")
         assert response.status_code == 200
         data = response.json()
-        assert data == []
+        assert data["orders"] == []
+        assert data["phase"] == "1"
+        assert "Orders functionality coming in Phase 2" in data["message"]
 
     def test_cors_middleware(self):
         """Test that CORS middleware is configured"""

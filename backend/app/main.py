@@ -1,57 +1,49 @@
 """
 TradingView x Dhan Trading System - Main FastAPI Application
-
-This is the main entry point for the FastAPI application.
-Phase 0: Basic structure only - no business logic yet.
+Phase 1: Basic FastAPI skeleton with health endpoint and initial API skeleton
 """
 
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 
 # Create FastAPI instance
 app = FastAPI(
     title="TradingView x Dhan Trading System",
-    description="Low-latency options trading system with Dhan integration",
-    version="0.1.0",
-    docs_url="/docs",
-    redoc_url="/redoc",
+    description="Low-latency options trading system with Dhan integration - Phase 1",
+    version="1.0.0",
 )
 
-# Configure CORS for frontend integration
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-# Phase 0: Basic endpoints only
+# Basic endpoints
 @app.get("/")
 async def root():
-    """Root endpoint - system status"""
+    """Root endpoint"""
     return {
         "message": "TradingView x Dhan Trading System",
-        "version": "0.1.0",
-        "phase": "0",
-        "status": "initialized",
+        "version": "1.0.0",
+        "phase": "1",
+        "status": "operational"
     }
-
 
 @app.get("/healthz")
 async def health_check():
-    """Health check endpoint for monitoring and deployment"""
-    return {"status": "ok", "phase": "0"}
-
+    """Health check endpoint"""
+    return {
+        "status": "ok"
+    }
 
 @app.get("/orders")
 async def get_orders():
-    """Get orders - Phase 0: returns empty list"""
-    return []
-
+    """Get orders - Phase 1 placeholder"""
+    return {
+        "orders": []
+    }
 
 if __name__ == "__main__":
     import uvicorn
-
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8000,
+        reload=False,
+        log_level="info",
+    )
