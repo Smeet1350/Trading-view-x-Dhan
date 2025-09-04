@@ -6,7 +6,9 @@ import axios from "axios";
 const BASE_URL =
   (typeof import.meta !== "undefined" && import.meta.env && import.meta.env.VITE_API_URL)
     ? import.meta.env.VITE_API_URL
-    : window.location.origin;
+    : (window.location.port === "5173"     // Vite dev server
+        ? "http://localhost:8000"          // talk to local FastAPI
+        : window.location.origin);          // same-origin in prod/Render
 
 function safeMsg(x) {
   if (!x && x !== 0) return "";
