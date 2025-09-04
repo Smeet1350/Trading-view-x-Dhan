@@ -11,6 +11,8 @@ from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, Query, Header
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
 # ====== Add your Dhan credentials here (no .env needed) ======
 DHAN_CLIENT_ID = "1107860004"
@@ -69,6 +71,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Serve the built React app from ./dist
+FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "dist")
+if os.path.exists(FRONTEND_DIR):
+    app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
+
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):
+        # For any unknown path, return index.html (SPA fallback)
+        return FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
 
 app.include_router(webhook_router)
 

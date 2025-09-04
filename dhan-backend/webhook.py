@@ -2,7 +2,9 @@
 import logging
 import sqlite3
 import uuid
-from datetime import datetime
+import time
+import pytz
+from datetime import datetime, date
 from fastapi import APIRouter, Request
 from dateutil import parser
 
@@ -15,8 +17,22 @@ ALERTS_LOGGER = logging.getLogger("alerts")
 router = APIRouter(prefix="/webhook", tags=["webhook"])
 
 # Global alerts log - newest first
-ALERTS_LOG = []
-MAX_ALERTS = 100
+IST = pytz.timezone("Asia/Kolkata")
+ALERTS_LOG = []   # newest first
+MAX_ALERTS = 200
+_LOG_DAY = None   # IST day when log was last (re)set
+
+def _today_ist():
+    return datetime.now(IST).date()
+
+def _rollover_if_new_day():
+    global _LOG_DAY, ALERTS_LOG
+    today = _today_ist()
+    if _LOG_DAY is None:
+        _LOG_DAY = today
+    elif _LOG_DAY != today:
+        ALERTS_LOG.clear()
+        _LOG_DAY = today
 
 
 def parse_expiry(exp_str: str):
@@ -168,23 +184,23 @@ async def webhook_trade(req: Request):
         )
         result = normalize_response(raw_res, success_msg="Order placed via webhook", error_msg="Webhook order failed")
 
-        # Attach request info to alerts log
+        # ensure daily rollover before logging
+        _rollover_if_new_day()
+
         alert_entry = {
             "id": str(uuid.uuid4()),
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(IST).isoformat(),
+            "ts_epoch": int(time.time() * 1000),
             "request": body,
             "instrument": inst,
             "response": result,
         }
-
-        # Store in in-memory list for dashboard
         ALERTS_LOG.insert(0, alert_entry)
         if len(ALERTS_LOG) > MAX_ALERTS:
             ALERTS_LOG.pop()
 
-        # Log persistently for terminal/log files
-        ALERTS_LOGGER.info("ALERT | %s", alert_entry)
-
+        # Also write to backend logs (optional but useful)
+        LOG.info("ALERT %s", alert_entry)
         return result
 
     except Exception as e:
@@ -193,6 +209,7 @@ async def webhook_trade(req: Request):
 
 
 @router.get("/alerts")
-def get_alerts():
+def get_alerts(limit: int = 100):
     """Get recent webhook alerts."""
-    return {"status": "success", "alerts": ALERTS_LOG}
+    _rollover_if_new_day()
+    return {"status": "success", "alerts": ALERTS_LOG[:max(1, min(limit, MAX_ALERTS))]}

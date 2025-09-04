@@ -1,7 +1,6 @@
 // App.jsx
 import React, { useEffect, useRef, useState } from "react";
 import axios from "axios";
-import Alerts from "./Alerts";
 
 // Back-end must run here:
 const BASE_URL = import.meta.env?.VITE_API_URL || `http://${window.location.hostname}:8000`;
@@ -42,6 +41,11 @@ export default function App() {
   const [marketNotice, setMarketNotice] = useState("");
   const [exitModal, setExitModal] = useState(null); 
   // null or {symbol, segment, securityId, qty, side}
+
+  const [liveAlerts, setLiveAlerts] = useState([]);      // ephemeral 20s cards
+  const seenAlertIdsRef = useRef(new Set());            // dedup across polls
+  const alertsPollRef = useRef(null);
+  const alertsCleanRef = useRef(null);
 
   const pollRef = useRef(null);
   const searchDebounceRef = useRef(null);
@@ -126,6 +130,65 @@ export default function App() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchQuery, segment]);
+
+  // Alerts polling and expiry effect
+  useEffect(() => {
+    const fetchAlerts = async () => {
+      try {
+        const r = await api.get("/webhook/alerts", { params: { limit: 100 } });
+        const arr = r.data?.alerts || [];
+        const now = Date.now();
+
+        // Collect only *new* alerts we haven't seen (dedup by stable backend id)
+        const newOnes = [];
+        for (const a of arr) {
+          const id = a?.id;
+          if (!id) continue;
+          if (!seenAlertIdsRef.current.has(id)) {
+            seenAlertIdsRef.current.add(id);
+
+            // Console log to the WEBSITE devtools (your Ctrl+Shift+I console)
+            // Use groups for readability
+            try {
+              const label = `[ALERT ${String(a?.response?.status || "unknown").toUpperCase()}] ${a?.request?.index || "-"} ${a?.request?.strike || "-"}${a?.request?.option_type || ""} ${a?.request?.side || ""} @ ${a?.timestamp || "-"}`;
+              console.groupCollapsed(label);
+              console.log("Request:", a?.request);
+              console.log("Instrument:", a?.instrument);
+              console.log("Response:", a?.response);
+              console.groupEnd();
+            } catch { /* ignore console errors */ }
+
+            // Enrich with local expiry for the dashboard (20s)
+            newOnes.push({ ...a, _expiry: now + 20000 });
+          }
+        }
+
+        if (newOnes.length) {
+          // Merge with existing (keep not expired), and prepend new ones
+          setLiveAlerts(prev => {
+            const survived = prev.filter(x => Date.now() < x._expiry);
+            return [...newOnes, ...survived];
+          });
+        }
+      } catch {
+        // ignore fetch errors for alerts
+      }
+    };
+
+    // first tick + poll every 5s
+    fetchAlerts();
+    alertsPollRef.current = setInterval(fetchAlerts, 5000);
+
+    // sweeper every 1s to enforce the 20s expiry *reliably*
+    alertsCleanRef.current = setInterval(() => {
+      setLiveAlerts(prev => prev.filter(x => Date.now() < x._expiry));
+    }, 1000);
+
+    return () => {
+      if (alertsPollRef.current) clearInterval(alertsPollRef.current);
+      if (alertsCleanRef.current) clearInterval(alertsCleanRef.current);
+    };
+  }, []);
 
   const pickInstrument = (inst) => {
     setSelectedInstrument({ ...inst, security_id: String(inst.securityId) });
@@ -243,8 +306,6 @@ export default function App() {
           </div>
         )}
 
-        {/* Webhook Alerts */}
-        <Alerts />
 
         {/* Funds */}
         <section className="card">
@@ -534,6 +595,38 @@ export default function App() {
               <div className="text-gray-400 mt-2">No orders found</div>
             )}
           </div>
+        </section>
+
+        {/* Live Webhook Alerts (auto vanish after 20s) */}
+        <section className="card">
+          <div className="flex items-center justify-between">
+            <h2 className="font-semibold text-lg text-pink-300">⚡ Live Webhook Alerts (20s)</h2>
+            <div className="text-xs text-gray-400">showing {liveAlerts.length}</div>
+          </div>
+
+          {liveAlerts.length === 0 ? (
+            <div className="text-sm text-gray-400 mt-2">No recent alerts</div>
+          ) : (
+            <div className="space-y-2 mt-3">
+              {liveAlerts.map(a => (
+                <div
+                  key={a.id}
+                  className={`p-3 rounded-lg ${String(a?.response?.status).toLowerCase()==="success" ? "bg-green-800/60" : "bg-red-800/60"}`}
+                >
+                  <div className="text-xs text-gray-300">
+                    {a.timestamp}
+                  </div>
+                  <div className="font-medium">
+                    {a?.request?.index} {a?.request?.strike}{a?.request?.option_type} {a?.request?.side}
+                    {a?.request?.lots ? ` • ${a.request.lots} lot(s)` : ""}
+                  </div>
+                  <div className="text-xs">
+                    <span className="opacity-70">Status:</span> {a?.response?.status || "-"} • <span className="opacity-70">Msg:</span> {a?.response?.message || "-"}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </section>
 
         <footer className="text-center text-xs text-gray-500">
