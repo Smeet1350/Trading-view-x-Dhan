@@ -3,7 +3,10 @@ import React, { useEffect, useRef, useState } from "react";
 import axios from "axios";
 
 // Back-end must run here:
-const BASE_URL = import.meta.env?.VITE_API_URL || `http://${window.location.hostname}:8000`;
+const BASE_URL =
+  (typeof import.meta !== "undefined" && import.meta.env && import.meta.env.VITE_API_URL)
+    ? import.meta.env.VITE_API_URL
+    : window.location.origin;
 
 function safeMsg(x) {
   if (!x && x !== 0) return "";

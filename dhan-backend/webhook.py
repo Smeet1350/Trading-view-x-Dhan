@@ -18,9 +18,9 @@ router = APIRouter(prefix="/webhook", tags=["webhook"])
 
 # Global alerts log - newest first
 IST = pytz.timezone("Asia/Kolkata")
-ALERTS_LOG = []   # newest first
+ALERTS_LOG = []         # newest first
 MAX_ALERTS = 200
-_LOG_DAY = None   # IST day when log was last (re)set
+_LOG_DAY = None         # IST date for rollover
 
 def _today_ist():
     return datetime.now(IST).date()
@@ -33,6 +33,20 @@ def _rollover_if_new_day():
     elif _LOG_DAY != today:
         ALERTS_LOG.clear()
         _LOG_DAY = today
+
+def _prune_alerts():
+    """Bound memory: drop alerts older than 24h and cap to MAX_ALERTS."""
+    from datetime import timedelta
+    cutoff = datetime.now(IST) - timedelta(days=1)
+    keep = []
+    for a in ALERTS_LOG:
+        try:
+            ts = datetime.fromisoformat(a.get("timestamp", ""))
+        except Exception:
+            ts = None
+        if ts and ts >= cutoff:
+            keep.append(a)
+    ALERTS_LOG[:] = keep[:MAX_ALERTS]
 
 
 def parse_expiry(exp_str: str):
@@ -184,9 +198,7 @@ async def webhook_trade(req: Request):
         )
         result = normalize_response(raw_res, success_msg="Order placed via webhook", error_msg="Webhook order failed")
 
-        # ensure daily rollover before logging
         _rollover_if_new_day()
-
         alert_entry = {
             "id": str(uuid.uuid4()),
             "timestamp": datetime.now(IST).isoformat(),
@@ -196,10 +208,7 @@ async def webhook_trade(req: Request):
             "response": result,
         }
         ALERTS_LOG.insert(0, alert_entry)
-        if len(ALERTS_LOG) > MAX_ALERTS:
-            ALERTS_LOG.pop()
-
-        # Also write to backend logs (optional but useful)
+        _prune_alerts()
         LOG.info("ALERT %s", alert_entry)
         return result
 
@@ -212,4 +221,6 @@ async def webhook_trade(req: Request):
 def get_alerts(limit: int = 100):
     """Get recent webhook alerts."""
     _rollover_if_new_day()
-    return {"status": "success", "alerts": ALERTS_LOG[:max(1, min(limit, MAX_ALERTS))]}
+    _prune_alerts()
+    limit = max(1, min(limit, MAX_ALERTS))
+    return {"status": "success", "alerts": ALERTS_LOG[:limit]}

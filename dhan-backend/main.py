@@ -63,24 +63,11 @@ app = FastAPI(title="Dhan Automation", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
+    allow_origins=["*"],      # simple for testing; tighten later if needed
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Serve the built React app from ./dist
-FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "dist")
-if os.path.exists(FRONTEND_DIR):
-    app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
-
-    @app.get("/{full_path:path}")
-    async def serve_spa(full_path: str):
-        # For any unknown path, return index.html (SPA fallback)
-        return FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
 
 app.include_router(webhook_router)
 
@@ -112,18 +99,33 @@ async def add_request_id(request, call_next):
             response.headers["X-Request-ID"] = rid
 
 start_scheduler()
-db_fresh = ensure_fresh_db(SQLITE_PATH)
+db_fresh = False  # set True if refresh triggers
 
-# Extra check: if still outdated, force download
-if not db_is_current(SQLITE_PATH):
-    LOG.warning("Instrument DB outdated — forcing fresh download now")
-    download_and_populate(SQLITE_PATH)
+def _refresh_instruments_on_boot():
+    global db_fresh
+    try:
+        if ensure_fresh_db(SQLITE_PATH):
+            db_fresh = True
+        if not db_is_current(SQLITE_PATH):
+            LOG.warning("Instrument DB outdated — forcing fresh download now (background)")
+            download_and_populate(SQLITE_PATH)
+    except Exception:
+        LOG.exception("Background instrument refresh failed")
+
+@app.on_event("startup")
+async def _kick_off_refresh():
+    import threading
+    threading.Thread(target=_refresh_instruments_on_boot, daemon=True).start()
 
 ok, why = init_broker(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN)
 if not ok:
     LOG.error("Broker init failed: %s", why)
 
 LOG.info("Backend boot complete")
+
+@app.get("/healthz")
+def healthz():
+    return {"ok": True}
 
 @app.get("/status")
 def api_status():
@@ -353,3 +355,18 @@ def debug_segments():
         return [{"segment": r[0], "count": r[1]} for r in rows]
     finally:
         conn.close()
+
+# ---- SPA static serving (after all API routes) ----
+FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "dist")
+if os.path.exists(FRONTEND_DIR):
+    app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
+
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):
+        return FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
+
+# Optional: run with "python main.py" locally or on Render (reads $PORT automatically)
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
