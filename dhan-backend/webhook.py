@@ -4,8 +4,10 @@ import sqlite3
 import uuid
 import time
 import pytz
+import json
 from datetime import datetime, date
 from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
 from dateutil import parser
 
 from orders import broker_ready, place_order_via_broker, normalize_response
@@ -82,6 +84,117 @@ def round_strike(strike: int, index_symbol: str) -> int:
     return round(strike / step) * step
 
 
+async def _parse_tv_request(req: Request) -> dict:
+    """
+    Support TradingView sending application/json, text/plain (raw JSON string),
+    or form-encoded with a single 'alert' field that contains JSON.
+    """
+    try:
+        # 1) try normal JSON
+        return await req.json()
+    except Exception:
+        # 2) try form-encoded: alert=<json>
+        try:
+            form = await req.form()
+            if "alert" in form:
+                return json.loads(str(form["alert"]))
+        except Exception:
+            pass
+        # 3) try raw text body
+        try:
+            raw = (await req.body() or b"").decode().strip()
+            if raw:
+                return json.loads(raw)
+        except Exception:
+            pass
+    return {}  # will be validated downstream
+
+async def process_tv_payload(req: Request) -> dict:
+    """
+    Unified TradingView handler used by '/', '/webhook', and '/webhook/trade'.
+    """
+    body = await _parse_tv_request(req)
+    LOG.info("Webhook payload: %s", body)
+
+    try:
+        ensure_fresh_db(SQLITE_PATH)
+        ok, why = broker_ready()
+        if not ok:
+            return {"status": "error", "message": f"Broker not ready: {why}"}
+
+        index_symbol = str(body.get("index", "")).upper()
+        raw_strike = int(body.get("strike", 0))
+        option_type = str(body.get("option_type", "")).upper()
+        side = str(body.get("side", "BUY")).upper()
+        order_type = str(body.get("order_type", "MARKET")).upper()
+        price = float(body.get("price") or 0)
+        product_type = str(body.get("product_type", "INTRADAY")).upper()
+        validity = str(body.get("validity", "DAY")).upper()
+
+        if not index_symbol or raw_strike <= 0 or option_type not in ("CE", "PE"):
+            return {"status": "error", "message": "Invalid input"}
+
+        strike = round_strike(raw_strike, index_symbol)
+        LOG.info("Strike rounded: %s -> %s (%s)", raw_strike, strike, index_symbol)
+
+        inst = find_instrument(SQLITE_PATH, index_symbol, strike, option_type)
+        if not inst:
+            return {"status": "error", "message": f"No instrument found for {index_symbol} {strike}{option_type}"}
+
+        lot_size = int(inst.get("lotSize") or 1)
+
+        lots = int(body.get("lots", 0))
+        qty = int(body.get("qty", 0))
+        if lots > 0:
+            qty = lots * lot_size
+        elif qty > 0:
+            if qty % lot_size != 0:
+                return {"status": "error", "message": f"Qty {qty} not multiple of lot {lot_size}"}
+        else:
+            qty = lot_size
+
+        if not inst.get("securityId"):
+            return {"status": "error", "message": "Instrument missing securityId"}
+        if not inst.get("lotSize"):
+            return {"status": "error", "message": "Instrument missing lotSize"}
+
+        segment = inst.get("segment") or infer_segment_from_symbol(inst["tradingSymbol"])
+        if not segment:
+            return {"status": "error", "message": f"Could not infer segment for {inst}"}
+
+        raw_res = place_order_via_broker(
+            security_id=str(inst["securityId"]),
+            segment=segment,
+            side=side,
+            qty=qty,
+            order_type=order_type,
+            price=None if order_type == "MARKET" else price,
+            product_type=product_type,
+            validity=validity,
+            symbol=inst["tradingSymbol"],
+            disclosed_qty=0,
+        )
+        result = normalize_response(raw_res, success_msg="Order placed via webhook", error_msg="Webhook order failed")
+
+        _rollover_if_new_day()
+        alert_entry = {
+            "id": str(uuid.uuid4()),
+            "timestamp": datetime.now(IST).isoformat(),
+            "ts_epoch": int(time.time() * 1000),
+            "request": body,
+            "instrument": inst,
+            "response": result,
+        }
+        ALERTS_LOG.insert(0, alert_entry)
+        _prune_alerts()
+        ALERTS_LOGGER.info("ALERT | %s", alert_entry)
+        return result
+
+    except Exception as e:
+        LOG.exception("Webhook trade failed")
+        return {"status": "error", "message": str(e)}
+
+
 def find_instrument(db_path: str, index_symbol: str, strike: int, option_type: str) -> dict:
     """Find instrument based on actual DB format."""
     conn = sqlite3.connect(db_path)
@@ -130,100 +243,7 @@ async def webhook_slash(req: Request):
 
 @router.post("/trade")
 async def webhook_trade(req: Request):
-    """Webhook endpoint for option trades."""
-    body = await req.json()
-    LOG.info("Webhook payload: %s", body)
-
-    try:
-        ensure_fresh_db(SQLITE_PATH)
-
-        ok, why = broker_ready()
-        if not ok:
-            return {"status": "error", "message": f"Broker not ready: {why}"}
-
-        index_symbol = str(body.get("index", "")).upper()
-        raw_strike = int(body.get("strike", 0))
-        option_type = str(body.get("option_type", "")).upper()
-        side = str(body.get("side", "BUY")).upper()
-        order_type = str(body.get("order_type", "MARKET")).upper()
-        price = float(body.get("price") or 0)
-        product_type = str(body.get("product_type", "INTRADAY")).upper()
-        validity = str(body.get("validity", "DAY")).upper()
-
-        if not index_symbol or raw_strike <= 0 or option_type not in ("CE", "PE"):
-            return {"status": "error", "message": "Invalid input"}
-
-        # Round strike to valid trading levels
-        strike = round_strike(raw_strike, index_symbol)
-        LOG.info("Strike rounded: %s -> %s (%s)", raw_strike, strike, index_symbol)
-
-        inst = find_instrument(SQLITE_PATH, index_symbol, strike, option_type)
-        if not inst:
-            return {"status": "error", "message": f"No instrument found for {index_symbol} {strike}{option_type}"}
-
-        lot_size = int(inst.get("lotSize") or 1)
-
-        # Quantity calculation
-        lots = int(body.get("lots", 0))   # new param
-        qty = int(body.get("qty", 0))     # backward-compatible
-
-        if lots > 0:
-            qty = lots * lot_size
-        elif qty > 0:
-            if qty % lot_size != 0:
-                return {"status": "error", "message": f"Qty {qty} not multiple of lot {lot_size}"}
-        else:
-            qty = lot_size  # default to 1 lot if nothing given
-
-        LOG.info("Order qty resolved: lots=%s lotSize=%s -> qty=%s", lots, lot_size, qty)
-
-        # Instrument validation
-        if not inst.get("securityId"):
-            return {"status": "error", "message": "Instrument missing securityId"}
-        
-        if not inst.get("lotSize"):
-            return {"status": "error", "message": "Instrument missing lotSize"}
-
-        # Segment fallback logic
-        segment = inst.get("segment") or infer_segment_from_symbol(inst["tradingSymbol"])
-        if not segment:
-            return {"status": "error", "message": f"Could not infer segment for {inst}"}
-
-        LOG.debug("Final instrument for order: %s", inst)
-        LOG.debug("Using segment=%s, lotSize=%s, securityId=%s",
-                  segment, inst.get("lotSize"), inst.get("securityId"))
-
-        raw_res = place_order_via_broker(
-            security_id=str(inst["securityId"]),
-            segment=segment,
-            side=side,
-            qty=qty,
-            order_type=order_type,
-            price=None if order_type == "MARKET" else price,
-            product_type=product_type,
-            validity=validity,
-            symbol=inst["tradingSymbol"],
-            disclosed_qty=0,
-        )
-        result = normalize_response(raw_res, success_msg="Order placed via webhook", error_msg="Webhook order failed")
-
-        _rollover_if_new_day()
-        alert_entry = {
-            "id": str(uuid.uuid4()),
-            "timestamp": datetime.now(IST).isoformat(),
-            "ts_epoch": int(time.time() * 1000),
-            "request": body,
-            "instrument": inst,
-            "response": result,
-        }
-        ALERTS_LOG.insert(0, alert_entry)
-        _prune_alerts()
-        ALERTS_LOGGER.info("ALERT | %s", alert_entry)
-        return result
-
-    except Exception as e:
-        LOG.exception("Webhook trade failed")
-        return {"status": "error", "message": str(e)}
+    return await process_tv_payload(req)
 
 
 @router.post("/test")
