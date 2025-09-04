@@ -113,15 +113,16 @@ def normalize_response(res, success_msg="Success", error_msg="Error"):
             raw = res.copy()
             
             # Friendly message for segment activation errors (DH-906)
-            err_code = (raw.get("remarks", {}) or {}).get("error_code") or \
-                       (raw.get("data", {}) or {}).get("errorCode") or ""
-            if str(err_code).upper() == "DH-906":
-                # Try to infer segment if present in raw
-                seg = (raw.get("request", {}) or {}).get("exchange_segment") or \
-                      (raw.get("data", {}) or {}).get("exchange_segment") or ""
+            err_code = str(
+                (raw.get("remarks") or {}).get("error_code") or
+                (raw.get("data") or {}).get("errorCode") or ""
+            ).upper()
+
+            if err_code == "DH-906":
+                seg = (raw.get("request") or {}).get("exchange_segment") or (raw.get("data") or {}).get("exchange_segment") or ""
                 seg_str = f" ({seg})" if seg else ""
                 return {"status": "error",
-                        "message": f"Exchange segment not activated{seg_str}. Enable it in Dhan or change the segment.",
+                        "message": f"Exchange segment not activated{seg_str}. Enable it in Dhan or switch segment.",
                         "broker": raw, "data": raw.get("data")}
             
             if str(raw.get("status", "")).lower() == "success" \

@@ -71,25 +71,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(webhook_router)
-
-# --- TradingView compatibility: accept POST at "/" and "/webhook" and forward to the same handler ---
-from fastapi import Request
-from fastapi.responses import JSONResponse
-from webhook import process_tv_payload  # new helper we'll add in webhook.py
-
-@app.post("/")
-async def tv_root(req: Request):
-    result = await process_tv_payload(req)
-    # 200 for success, 400 for user errors, 500 already handled inside
-    status = 200 if result.get("status") == "success" else 400
-    return JSONResponse(status_code=status, content=result)
-
-@app.post("/webhook")
-async def tv_webhook(req: Request):
-    result = await process_tv_payload(req)
-    status = 200 if result.get("status") == "success" else 400
-    return JSONResponse(status_code=status, content=result)
+# Include webhook routes at root
+app.include_router(webhook_router, tags=["webhook"])
 
 @app.middleware("http")
 async def add_request_id(request, call_next):
