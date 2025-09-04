@@ -356,41 +356,39 @@ def debug_segments():
     finally:
         conn.close()
 
-# ---- SPA static serving (auto-detect dist) ----
+# ---- SPA static serving ----
 from pathlib import Path
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import logging
 
 LOG = logging.getLogger("backend")
-
 BASE_DIR = Path(__file__).parent
 
-# Try common dist locations (first match wins)
-CANDIDATE_DIST = [
-    BASE_DIR / "frontend" / "dist",        # repo/backend/main.py + repo/backend/frontend/dist
-    BASE_DIR.parent / "dhan-frontend" / "dist",  # repo/backend + repo/dhan-frontend/dist
-    BASE_DIR / "dist",                      # repo root with main.py + dist (monorepo-less)
+# Primary: sibling 'dhan-frontend/dist'
+CANDIDATES = [
+    BASE_DIR / "dhan-frontend" / "dist",
+    BASE_DIR / "frontend" / "dist",
+    BASE_DIR / "dist",
 ]
+DIST_DIR = next((p for p in CANDIDATES if (p / "index.html").exists() and (p / "assets").exists()), None)
 
-DIST_DIR = next((p for p in CANDIDATE_DIST if p.exists()), None)
-
-if DIST_DIR and (DIST_DIR / "assets").exists() and (DIST_DIR / "index.html").exists():
+if DIST_DIR:
     LOG.info("Serving SPA from %s", DIST_DIR)
     app.mount("/assets", StaticFiles(directory=DIST_DIR / "assets"), name="assets")
 
     @app.get("/", include_in_schema=False)
-    def index():
+    def serve_index():
         return FileResponse(DIST_DIR / "index.html")
 
-    @app.get("/{full_path:path}", include_in_schema=False)
-    def spa_fallback(full_path: str):
-        file_path = DIST_DIR / full_path
-        if file_path.is_file():
-            return FileResponse(file_path)
+    @app.get("/{path:path}", include_in_schema=False)
+    def spa_fallback(path: str):
+        f = DIST_DIR / path
+        if f.is_file():
+            return FileResponse(f)
         return FileResponse(DIST_DIR / "index.html")
 else:
-    LOG.warning("SPA dist folder not found. Checked: %s", CANDIDATE_DIST)
+    LOG.warning("No SPA dist found. Expected one of: %s", CANDIDATES)
 
 # Optional: run with "python main.py" locally or on Render (reads $PORT automatically)
 if __name__ == "__main__":
