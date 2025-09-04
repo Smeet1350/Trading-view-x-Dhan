@@ -12,7 +12,8 @@ from typing import Any, Dict, Optional
 from fastapi import FastAPI, Query, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
+from pathlib import Path
 
 # ====== Add your Dhan credentials here (no .env needed) ======
 DHAN_CLIENT_ID = "1107860004"
@@ -356,39 +357,55 @@ def debug_segments():
     finally:
         conn.close()
 
-# ---- SPA static serving ----
-from pathlib import Path
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
-import logging
+# ---------- STATIC / SPA (Render-ready, zero npm at deploy) ----------
 
 LOG = logging.getLogger("backend")
+
 BASE_DIR = Path(__file__).parent
+STATIC_DIR = BASE_DIR / "static"              # <-- we commit built files here
+INDEX_HTML = STATIC_DIR / "index.html"
+ASSETS_DIR = STATIC_DIR / "assets"
 
-# Primary: sibling 'dhan-frontend/dist'
-CANDIDATES = [
-    BASE_DIR / "dhan-frontend" / "dist",
-    BASE_DIR / "frontend" / "dist",
-    BASE_DIR / "dist",
-]
-DIST_DIR = next((p for p in CANDIDATES if (p / "index.html").exists() and (p / "assets").exists()), None)
-
-if DIST_DIR:
-    LOG.info("Serving SPA from %s", DIST_DIR)
-    app.mount("/assets", StaticFiles(directory=DIST_DIR / "assets"), name="assets")
+if INDEX_HTML.exists() and ASSETS_DIR.exists():
+    LOG.info("Serving SPA from %s", STATIC_DIR)
+    # Vite index.html references /assets/...; mount that exact path.
+    app.mount("/assets", StaticFiles(directory=ASSETS_DIR), name="assets")
 
     @app.get("/", include_in_schema=False)
-    def serve_index():
-        return FileResponse(DIST_DIR / "index.html")
+    def serve_index_root():
+        return FileResponse(INDEX_HTML)
 
+    # Serve any file that actually exists under /static (favicon, icons, etc.)
+    @app.get("/static/{path:path}", include_in_schema=False)
+    def serve_static_passthrough(path: str):
+        file_path = STATIC_DIR / path
+        if file_path.is_file():
+            return FileResponse(file_path)
+        return FileResponse(INDEX_HTML)
+
+    # SPA fallback for client-side routes (/orders, /positions, etc.)
     @app.get("/{path:path}", include_in_schema=False)
     def spa_fallback(path: str):
-        f = DIST_DIR / path
+        f = STATIC_DIR / path
         if f.is_file():
             return FileResponse(f)
-        return FileResponse(DIST_DIR / "index.html")
+        return FileResponse(INDEX_HTML)
 else:
-    LOG.warning("No SPA dist found. Expected one of: %s", CANDIDATES)
+    LOG.warning("Frontend bundle missing. Expected %s and %s", INDEX_HTML, ASSETS_DIR)
+
+    @app.get("/", include_in_schema=False)
+    def placeholder():
+        # Minimal page so you don't get a black screen if bundle is missing
+        html = """
+        <!doctype html><meta charset="utf-8">
+        <title>Trading View x Dhan</title>
+        <div style="font:16px system-ui;padding:24px">
+          <h1>Backend is running ✅</h1>
+          <p>No frontend bundle found at <code>dhan-backend/static/</code>.</p>
+          <p>Commit your built UI (Vite <code>dist</code>) into that folder to enable the app.</p>
+        </div>
+        """
+        return HTMLResponse(html)
 
 # Optional: run with "python main.py" locally or on Render (reads $PORT automatically)
 if __name__ == "__main__":
