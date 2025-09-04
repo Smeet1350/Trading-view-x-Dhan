@@ -15,9 +15,10 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse
 from pathlib import Path
 
-# ====== Add your Dhan credentials here (no .env needed) ======
-DHAN_CLIENT_ID = "1107860004"
-DHAN_ACCESS_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiJ9.eyJpc3MiOiJkaGFuIiwicGFydG5lcklkIjoiIiwiZXhwIjoxNzU5NDI4NjYwLCJpYXQiOjE3NTY4MzY2NjAsInRva2VuQ29uc3VtZXJUeXBlIjoiU0VMRiIsIndlYmhvb2tVcmwiOiIiLCJkaGFuQ2xpZW50SWQiOiIxMTA3ODYwMDA0In0.ItPA3IuAidky2QpjG89uD0S60ysgAURoEDhaNrirzc6e1JENEbh3rij9wRPXgDjE_1Lkoovo5Qw5cCjLevRzhg"
+# ====== Dhan credentials (env first; fallback to current) ======
+import os
+DHAN_CLIENT_ID = os.getenv("DHAN_CLIENT_ID") or "1107860004"
+DHAN_ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN") or "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiJ9.eyJpc3MiOiJkaGFuIiwicGFydG5lcklkIjoiIiwiZXhwIjoxNzU5NDI4NjYwLCJpYXQiOjE3NTY4MzY2NjAsInRva2VuQ29uc3VtZXJUeXBlIjoiU0VMRiIsIndlYmhvb2tVcmwiOiIiLCJkaGFuQ2xpZW50SWQiOiIxMTA3ODYwMDA0In0.ItPA3IuAidky2QpjG89uD0S60ysgAURoEDhaNrirzc6e1JENEbh3rij9wRPXgDjE_1Lkoovo5Qw5cCjLevRzhg"
 
 from scheduler import (
     start_scheduler,
@@ -47,18 +48,18 @@ logging.basicConfig(
     format="%(asctime)s.%(msecs)03d %(levelname)s [%(name)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+from config import SQLITE_PATH, ALERTS_LOG_PATH
+
 LOG = logging.getLogger("backend")
 
 # Setup alerts logging with daily rotation
-handler = TimedRotatingFileHandler("alerts.log", when="midnight", backupCount=7)
+handler = TimedRotatingFileHandler(ALERTS_LOG_PATH, when="midnight", backupCount=7)
 formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
 handler.setFormatter(formatter)
 
 alerts_logger = logging.getLogger("alerts")
 alerts_logger.setLevel(logging.INFO)
 alerts_logger.addHandler(handler)
-
-from config import SQLITE_PATH
 
 app = FastAPI(title="Dhan Automation", version="1.0.0")
 

@@ -60,6 +60,22 @@ def broker_ready() -> Tuple[bool, str]:
 
 
 # --- Normalization ---
+ERROR_HINTS = {
+    "DH-906": "Exchange segment not enabled on your Dhan account. Enable NSE F&O (or place only Equity orders)."
+}
+
+def with_hints(payload):
+    try:
+        code = (
+            payload.get("broker", {}).get("remarks", {}).get("error_code")
+            or payload.get("broker", {}).get("data", {}).get("errorCode")
+        )
+        if code in ERROR_HINTS and payload.get("status") == "error":
+            payload["message"] = f'{payload.get("message")} — {ERROR_HINTS[code]}'
+    except Exception:
+        pass
+    return payload
+
 def normalize_response(res, success_msg="Success", error_msg="Error"):
     """
     Normalize Dhan SDK response into consistent shape.
@@ -105,14 +121,17 @@ def normalize_response(res, success_msg="Success", error_msg="Error"):
                    or raw.get("data", {}).get("errorMessage")
                    or raw.get("message")
                    or error_msg)
-            return {"status": "error", "message": str(msg),
+            result = {"status": "error", "message": str(msg),
                     "broker": raw, "data": raw.get("data")}
+            return with_hints(result)
 
-        return {"status": "error", "message": str(res),
+        result = {"status": "error", "message": str(res),
                 "broker": {"raw": str(res)}, "data": None}
+        return with_hints(result)
     except Exception as e:
-        return {"status": "error", "message": f"Normalization failed: {e}",
+        result = {"status": "error", "message": f"Normalization failed: {e}",
                 "broker": {"raw": str(res)}, "data": None}
+        return with_hints(result)
 
 
 # --- Order placement ---

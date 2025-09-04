@@ -119,6 +119,15 @@ def find_instrument(db_path: str, index_symbol: str, strike: int, option_type: s
         conn.close()
 
 
+# Backward compat: accept POST /webhook and POST /webhook/
+@router.post("")
+async def webhook_root(req: Request):
+    return await webhook_trade(req)
+
+@router.post("/")
+async def webhook_slash(req: Request):
+    return await webhook_trade(req)
+
 @router.post("/trade")
 async def webhook_trade(req: Request):
     """Webhook endpoint for option trades."""
@@ -209,13 +218,21 @@ async def webhook_trade(req: Request):
         }
         ALERTS_LOG.insert(0, alert_entry)
         _prune_alerts()
-        LOG.info("ALERT %s", alert_entry)
+        ALERTS_LOGGER.info("ALERT | %s", alert_entry)
         return result
 
     except Exception as e:
         LOG.exception("Webhook trade failed")
         return {"status": "error", "message": str(e)}
 
+
+@router.post("/test")
+async def webhook_test(req: Request):
+    sample = {
+        "index": "NIFTY", "strike": 20000, "option_type": "CE", "side": "BUY",
+        "order_type": "MARKET", "lots": 1
+    }
+    return await webhook_trade(type("obj", (object,), {"json": lambda: sample})())
 
 @router.get("/alerts")
 def get_alerts(limit: int = 100):
