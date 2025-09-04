@@ -61,4 +61,6 @@ yarn-error.log*
 # Build outputs
 dist/
 build/
+dhan-frontend/dist/
+dhan-backend/dist/
 
