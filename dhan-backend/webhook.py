@@ -117,6 +117,7 @@ async def _process(req: Request) -> Dict:
             segment = inst.get("segment") or "NSE_EQ"
 
             # Place order via threadpool with internal timeout
+            LOG.info("Placing equity order: %s %s %s qty=%d", inst["tradingSymbol"], side, order_type, qty)
             raw_res = await run_in_threadpool(place_order_via_broker,
                 security_id=str(inst["securityId"]),
                 segment=segment,
@@ -130,6 +131,7 @@ async def _process(req: Request) -> Dict:
                 disclosed_qty=0,
             )
             res = normalize_response(raw_res, success_msg="Equity order placed", error_msg="Equity order failed")
+            LOG.info("Equity order result: %s", res.get("status", "unknown"))
 
         else:
             # Options payload (index/strike/option_type/lots or qty)
@@ -146,11 +148,21 @@ async def _process(req: Request) -> Dict:
                 return {"status":"error","message":"Invalid options payload"}
 
             # Import helper functions
-            from webhook import round_strike, find_instrument, infer_segment_from_symbol
+            from scheduler import resolve_symbol
             
             strike = round_strike(raw_strike, index_symbol)
-            # Offload blocking DB lookup to threadpool
-            inst = await run_in_threadpool(find_instrument, SQLITE_PATH, index_symbol, strike, option_type)
+            # Try multiple symbol formats for options
+            trading_symbols = [
+                f"{index_symbol}-{strike}-{option_type}",
+                f"{index_symbol}{strike}{option_type}",
+                f"{index_symbol} {strike} {option_type}",
+            ]
+            
+            inst = None
+            for symbol_format in trading_symbols:
+                inst = await run_in_threadpool(resolve_symbol, SQLITE_PATH, symbol_format, "NSE_FNO")
+                if inst:
+                    break
             if not inst:
                 LOG.warning("Instrument not found: %s %s%s", index_symbol, strike, option_type)
                 _nonblocking_ensure_db_refresh(SQLITE_PATH)
@@ -166,8 +178,9 @@ async def _process(req: Request) -> Dict:
             elif qty % lot_size != 0:
                 return {"status":"error","message":f"Qty {qty} not multiple of lot {lot_size}"}
 
-            segment = inst.get("segment") or infer_segment_from_symbol(inst["tradingSymbol"])
+            segment = inst.get("segment") or "NSE_FNO"
             # Place order via threadpool with internal timeout
+            LOG.info("Placing F&O order: %s %s %s qty=%d", inst["tradingSymbol"], side, order_type, qty)
             raw_res = await run_in_threadpool(place_order_via_broker,
                 security_id=str(inst["securityId"]),
                 segment=segment,
@@ -181,6 +194,7 @@ async def _process(req: Request) -> Dict:
                 disclosed_qty=0,
             )
             res = normalize_response(raw_res, success_msg="F&O order placed", error_msg="F&O order failed")
+            LOG.info("F&O order result: %s", res.get("status", "unknown"))
 
         # append to bounded alerts log (safe in-memory)
         alert_entry = {
@@ -222,73 +236,6 @@ def round_strike(strike: int, index_symbol: str) -> int:
     """Round strike price to valid trading levels based on index."""
     step = 50 if "NIFTY" in index_symbol.upper() else 100
     return round(strike / step) * step
-
-def infer_segment_from_symbol(symbol: str) -> str:
-    """Infer segment from trading symbol when database segment is None."""
-    s = symbol.upper()
-    if any(idx in s for idx in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY")):
-        return "NSE_FNO"
-    if "MCX" in s:
-        return "MCX"
-    if "BSE" in s:
-        return "BSE_EQ"
-    if "NSE" in s:
-        return "NSE_EQ"
-    return "NSE_FNO"  # safe default
-
-def find_instrument(db_path: str, index_symbol: str, strike: int, option_type: str) -> dict:
-    """Find instrument based on actual DB format."""
-    import sqlite3
-    conn = sqlite3.connect(db_path)
-    try:
-        sql = """
-            SELECT securityId, tradingSymbol, segment, lotSize, expiry
-            FROM instruments
-            WHERE UPPER(tradingSymbol) LIKE ?
-              AND UPPER(tradingSymbol) LIKE ?
-        """
-        like_index = f"{index_symbol.upper()}%"
-        like_suffix = f"%-{strike}-{option_type.upper()}"
-        rows = conn.execute(sql, (like_index, like_suffix)).fetchall()
-
-        if not rows:
-            return {}
-
-        cols = ["securityId", "tradingSymbol", "segment", "lotSize", "expiry"]
-        today = datetime.now().date()
-
-        valid = []
-        for r in rows:
-            rec = dict(zip(cols, r))
-            expd = parse_expiry(rec.get("expiry", ""))
-            if expd and expd >= today:
-                valid.append((expd, rec))
-
-        if not valid:
-            return {}
-
-        valid.sort(key=lambda x: x[0])
-        return valid[0][1]
-
-    finally:
-        conn.close()
-
-def parse_expiry(exp_str: str):
-    """Robust expiry date parsing."""
-    if not exp_str or exp_str == "0001-01-01":
-        return None
-    try:
-        return datetime.strptime(exp_str, "%Y-%m-%d").date()
-    except Exception:
-        try:
-            from dateutil import parser
-            return parser.parse(exp_str, fuzzy=True).date()
-        except Exception:
-            return None
-
-def _rollover_if_new_day():
-    """Simple rollover function."""
-    pass
 
 # Alerts endpoint
 @router.get("/webhook/alerts")
