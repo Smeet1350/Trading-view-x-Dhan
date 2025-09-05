@@ -1,7 +1,15 @@
 # webhook.py
 import json, time, uuid
-from datetime import datetime
-from fastapi import APIRouter, Request
+import os
+import logging
+import threading
+from collections import deque
+from datetime import datetime, timedelta
+from pathlib import Path
+
+from starlette.concurrency import run_in_threadpool
+
+from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse
 from typing import Dict
 
@@ -12,19 +20,36 @@ from orders import (
     broker_ready, place_order_via_broker, normalize_response
 )
 
-# ---- If importing LOG, ALERTS_LOG from main.py created a circular import: ----
-# Comment the import above and paste small local shims here instead:
-import logging
 LOG = logging.getLogger("backend")
-try:
-    from collections import deque
-    ALERTS_LOG = deque(maxlen=500)  # same shape as your in-memory feed
-    def _prune_alerts(): pass
-except Exception:
-    pass
-# ------------------------------------------------------------------------------
+# keep alert log bounded to avoid unbounded memory growth
+ALERTS_LOG = deque(maxlen=500)
 
 router = APIRouter()
+
+
+def _nonblocking_ensure_db_refresh(db_path: str):
+    """Cheap check of DB mtime and spawn background refresh if stale.
+    IMPORTANT: This function must NOT perform heavy IO on the request path.
+    """
+    try:
+        p = Path(db_path)
+        stale = True
+        if p.exists():
+            mtime = datetime.fromtimestamp(p.stat().st_mtime)
+            # treat DB as stale after 24 hours (adjust if needed)
+            if mtime > datetime.now() - timedelta(hours=24):
+                stale = False
+        if stale:
+            def bg():
+                try:
+                    ensure_fresh_db(db_path)
+                except Exception:
+                    LOG.exception("Background DB refresh failed")
+            t = threading.Thread(target=bg, daemon=True)
+            t.start()
+    except Exception:
+        LOG.exception("Non-blocking DB freshness check failed (ignored)")
+
 
 async def _parse_tv_request(req: Request) -> Dict:
     """
@@ -58,11 +83,13 @@ async def _process(req: Request) -> Dict:
     body = await _parse_tv_request(req)
     LOG.info("Webhook payload: %s", body)
 
+    # cheap non-blocking DB refresh check (no heavy work here)
+    _nonblocking_ensure_db_refresh(SQLITE_PATH)
+
     # Allow simple equity payloads as well (symbol/side/quantity)
     is_equity = "symbol" in body
 
     try:
-        ensure_fresh_db(SQLITE_PATH)
         ok, why = broker_ready()
         if not ok:
             return {"status": "error", "message": f"Broker not ready: {why}"}
@@ -80,12 +107,17 @@ async def _process(req: Request) -> Dict:
 
             # For equity, we need to find by symbol directly
             from scheduler import resolve_symbol
-            inst = resolve_symbol(SQLITE_PATH, symbol, "NSE_EQ")
+            # Offload blocking DB lookup to threadpool
+            inst = await run_in_threadpool(resolve_symbol, SQLITE_PATH, symbol, "NSE_EQ")
             if not inst or not inst.get("securityId"):
+                LOG.warning("Symbol not found: %s", symbol)
+                # schedule a background refresh but still respond quickly
+                _nonblocking_ensure_db_refresh(SQLITE_PATH)
                 return {"status": "error", "message": f"No instrument for {symbol}"}
             segment = inst.get("segment") or "NSE_EQ"
 
-            raw_res = place_order_via_broker(
+            # Place order via threadpool with internal timeout
+            raw_res = await run_in_threadpool(place_order_via_broker,
                 security_id=str(inst["securityId"]),
                 segment=segment,
                 side=side,
@@ -117,8 +149,11 @@ async def _process(req: Request) -> Dict:
             from webhook import round_strike, find_instrument, infer_segment_from_symbol
             
             strike = round_strike(raw_strike, index_symbol)
-            inst = find_instrument(SQLITE_PATH, index_symbol, strike, option_type)
+            # Offload blocking DB lookup to threadpool
+            inst = await run_in_threadpool(find_instrument, SQLITE_PATH, index_symbol, strike, option_type)
             if not inst:
+                LOG.warning("Instrument not found: %s %s%s", index_symbol, strike, option_type)
+                _nonblocking_ensure_db_refresh(SQLITE_PATH)
                 return {"status": "error", "message": f"No instrument for {index_symbol} {strike}{option_type}"}
 
             lot_size = int(inst.get("lotSize") or 1)
@@ -132,7 +167,8 @@ async def _process(req: Request) -> Dict:
                 return {"status":"error","message":f"Qty {qty} not multiple of lot {lot_size}"}
 
             segment = inst.get("segment") or infer_segment_from_symbol(inst["tradingSymbol"])
-            raw_res = place_order_via_broker(
+            # Place order via threadpool with internal timeout
+            raw_res = await run_in_threadpool(place_order_via_broker,
                 security_id=str(inst["securityId"]),
                 segment=segment,
                 side=side,
@@ -146,9 +182,7 @@ async def _process(req: Request) -> Dict:
             )
             res = normalize_response(raw_res, success_msg="F&O order placed", error_msg="F&O order failed")
 
-        # append to in-memory alerts feed
-        from webhook import _rollover_if_new_day
-        _rollover_if_new_day()
+        # append to bounded alerts log (safe in-memory)
         alert_entry = {
             "id": str(uuid.uuid4()),
             "timestamp": datetime.now().isoformat(),
@@ -157,18 +191,15 @@ async def _process(req: Request) -> Dict:
             "instrument": {k: res.get("symbol") if k=="tradingSymbol" else v for k,v in ({} if not is_equity else {"tradingSymbol": symbol}).items()},
             "response": res,
         }
-        try:
-            ALERTS_LOG.appendleft(alert_entry)  # if deque
-        except Exception:
-            ALERTS_LOG.insert(0, alert_entry)   # if list
-        _prune_alerts()
+        ALERTS_LOG.appendleft(alert_entry)
 
         status_code = 200 if res.get("status") == "success" else 400
         return res | {"status_code": status_code}
 
     except Exception as e:
         LOG.exception("Webhook processing failed")
-        return {"status":"error","message":str(e)}
+        # Return a safe 500 without leaking internals
+        raise HTTPException(status_code=500, detail="internal_error")
 
 # Routes that all hit the same processor
 @router.post("/")
@@ -261,7 +292,7 @@ def _rollover_if_new_day():
 
 # Alerts endpoint
 @router.get("/webhook/alerts")
-def get_alerts(limit: int = 100):
+async def get_alerts(limit: int = 100):
     """Get recent webhook alerts."""
     limit = max(1, min(limit, 500))
     alerts_list = list(ALERTS_LOG)[:limit] if hasattr(ALERTS_LOG, '__iter__') else []

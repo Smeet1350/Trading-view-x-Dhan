@@ -8,6 +8,7 @@ import sys
 from typing import Dict, Any, Optional, Tuple
 
 from dhanhq import dhanhq
+from utils import call_with_timeout
 
 logger = logging.getLogger("orders")
 if not logger.handlers:
@@ -19,6 +20,12 @@ logger.setLevel(logging.DEBUG if os.getenv("LOG_LEVEL", "INFO").upper() == "DEBU
 _dhan: Optional[dhanhq] = None
 _dhan_ready: bool = False
 _dhan_error: str = ""
+
+# Expect a function in main.py that returns a configured dhanhq client
+try:
+    from main import get_dhan_client
+except Exception:
+    get_dhan_client = None
 
 EX_SEG_MAP = {
     "NSE_EQ": "NSE",
@@ -161,7 +168,11 @@ def place_order_via_broker(
     validity: str,
     symbol: str = "",
     disclosed_qty: int | None = 0,
+    timeout: int = 15,
 ):
+    """Place an order using the Dhan SDK, with a timeout to avoid indefinite blocking.
+    Callers should offload this function to a threadpool when used from async contexts.
+    """
     ok, why = broker_ready()
     if not ok:
         return RuntimeError(f"Broker not ready: {why}")
@@ -180,14 +191,19 @@ def place_order_via_broker(
             "disclosed_quantity": int(disclosed_qty or 0),
         }
         logger.info("Placing order: payload=%s", payload)
-        return _dhan.place_order(**payload)   # return raw, no normalization
+        
+        # Wrap the SDK call with timeout
+        def _inner():
+            return _dhan.place_order(**payload)
+        
+        return call_with_timeout(_inner, timeout=timeout)
     except Exception as e:
         logger.exception("place_order_via_broker failed")
         return e
 
 
 # --- Safe wrapper for other SDK calls ---
-def _safe_call(method_name: str, *args, **kwargs):
+def _safe_call(method_name: str, *args, timeout: int = 10, **kwargs):
     ok, why = broker_ready()
     if not ok:
         return RuntimeError(f"Broker not ready: {why}")
@@ -195,7 +211,11 @@ def _safe_call(method_name: str, *args, **kwargs):
         method = getattr(_dhan, method_name, None)
         if not method:
             raise AttributeError(f"Dhan SDK missing method: {method_name}")
-        return method(*args, **kwargs)  # return raw
+        
+        def _inner():
+            return method(*args, **kwargs)
+        
+        return call_with_timeout(_inner, timeout=timeout)
     except Exception as e:
         logger.exception("SDK call %s failed", method_name)
         return e

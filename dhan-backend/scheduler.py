@@ -1,169 +1,147 @@
 # scheduler.py
-from __future__ import annotations
-
-import io
-import logging
 import os
 import sqlite3
-from datetime import datetime
-from typing import Dict, List, Optional
-
-import pandas as pd
-import numpy as np
+import tempfile
+import threading
+import logging
+from pathlib import Path
 import requests
-from apscheduler.schedulers.background import BackgroundScheduler
+import pandas as pd
 
-LOG = logging.getLogger("scheduler")
+LOG = logging.getLogger(__name__)
 
-DEFAULT_DB = os.getenv("INSTRUMENTS_DB", "instruments.db")
-MASTER_URL = os.getenv("DHAN_MASTER_URL", "https://images.dhan.co/api-data/api-scrip-master.csv")
+MASTER_URL_COMPACT = "https://images.dhan.co/api-data/api-scrip-master.csv"
+MASTER_URL_DETAILED = "https://images.dhan.co/api-data/api-scrip-master-detailed.csv"
 
-# ---- helpers ----
-def _connect(db_path: str) -> sqlite3.Connection:
-    return sqlite3.connect(db_path, timeout=30, isolation_level=None)
 
-def _ensure_indexes(conn: sqlite3.Connection) -> None:
-    cur = conn.cursor()
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS instruments (
-            securityId TEXT,
-            tradingSymbol TEXT,
-            segment TEXT,
-            lotSize INTEGER,
-            expiry TEXT
-        )
-        """
-    )
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_tradingsymbol ON instruments(tradingSymbol)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_segment ON instruments(segment)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_securityid ON instruments(securityId)")
-    conn.commit()
+def _ensure_dir(path: str):
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
 
-# Column candidates from Dhan CSV (actual headers)
-CANDIDATES = {
-    "securityId": ["SEM_SMST_SECURITY_ID"],
-    "tradingSymbol": ["SEM_TRADING_SYMBOL", "SM_SYMBOL_NAME"],
-    "segment_code": ["SEM_EXM_EXCH_ID"],
-    "segment_text": ["SEM_SEGMENT"],
-    "lotSize": ["SEM_LOT_UNITS"],
-    "expiry": ["SEM_EXPIRY_DATE"],
-}
 
-SEG_MAP_CODE = {"1": "NSE_EQ", "2": "BSE_EQ", "13": "NSE_FNO", "50": "MCX"}
+def download_and_populate(db_path: str, master_url: str = MASTER_URL_COMPACT, chunksize: int = 200000):
+    """Download the instrument master CSV as a stream and populate sqlite in a memory friendly, chunked way.
 
-def _pick(df: pd.DataFrame, names: List[str]) -> Optional[str]:
-    for n in names:
-        if n in df.columns:
-            return n
-    return None
+    Writes the remote CSV to a temp file, reads in pandas chunks, writes to a temp sqlite DB,
+    then atomically swaps the DB to avoid leaving partial state.
+    """
+    LOG.info("Starting download_and_populate db=%s", db_path)
+    _ensure_dir(db_path)
 
-def _norm_segment(code, txt, trading_symbol: str = "") -> Optional[str]:
-    # Check trading symbol first for options
-    t = str(trading_symbol).upper()
-    if any(idx in t for idx in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY")):
-        return "NSE_FNO"
-    
-    if pd.notna(code):
-        if isinstance(code, (int, float, np.integer, np.floating)) and not pd.isna(code):
-            s = str(int(code))
-        else:
-            s = str(code).strip()
-        if s in SEG_MAP_CODE:
-            return SEG_MAP_CODE[s]
-    if pd.notna(txt):
-        t = str(txt).upper()
-        if "FNO" in t or "DERIV" in t:
-            return "NSE_FNO"
-        if "MCX" in t:
-            return "MCX"
-        if "BSE" in t:
-            return "BSE_EQ"
-        if "NSE" in t:
-            return "NSE_EQ"
-        if "EQ" in t:
-            return "NSE_EQ"
-    return None
-
-# ------------- Instrument master ops -------------
-def download_and_populate(db_path: Optional[str] = None) -> Dict[str, str | int]:
-    """Download Dhan scrip master and rebuild instruments with real columns."""
-    db_path = db_path or DEFAULT_DB
-    LOG.info("⏬ Downloading scrip master from %s", MASTER_URL)
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".csv")
+    os.close(tmp_fd)
     try:
-        r = requests.get(MASTER_URL, timeout=60)
-        r.raise_for_status()
-        raw = r.content
-        if len(raw) < 10 * 1024 * 1024:
-            raise RuntimeError(f"CSV too small: {len(raw)} bytes — aborting")
-        df = pd.read_csv(io.BytesIO(raw), low_memory=False)
-        if len(df) < 50000:
-            raise RuntimeError(f"Too few rows: {len(df)} — aborting")
+        with requests.get(master_url, stream=True, timeout=60) as r:
+            r.raise_for_status()
+            with open(tmp_path, "wb") as fh:
+                for chunk in r.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        fh.write(chunk)
 
-        sec_col = _pick(df, CANDIDATES["securityId"])
-        ts_col  = _pick(df, CANDIDATES["tradingSymbol"])
-        segc    = _pick(df, CANDIDATES["segment_code"])
-        segt    = _pick(df, CANDIDATES["segment_text"])
-        lot_col = _pick(df, CANDIDATES["lotSize"])
-        exp_col = _pick(df, CANDIDATES["expiry"])
+        reader = pd.read_csv(tmp_path, chunksize=chunksize, low_memory=True)
 
-        if not sec_col or not ts_col:
-            raise RuntimeError("Required columns missing (securityId/tradingSymbol). Dhan CSV format changed?")
+        first = True
+        tmp_db_fd, tmp_db_path = tempfile.mkstemp(suffix=".db")
+        os.close(tmp_db_fd)
+        try:
+            conn = sqlite3.connect(tmp_db_path)
+            with conn:
+                for chunk in reader:
+                    # Optionally filter or rename columns here to reduce DB size
+                    if first:
+                        chunk.to_sql("instruments", conn, if_exists="replace", index=False)
+                        first = False
+                    else:
+                        chunk.to_sql("instruments", conn, if_exists="append", index=False)
+            conn.close()
 
-        out = pd.DataFrame()
-        out["securityId"] = df[sec_col].astype(str)
-        out["tradingSymbol"] = df[ts_col].astype(str)
-        out["segment"] = [
-            _norm_segment(df[segc].iloc[i] if segc else None, df[segt].iloc[i] if segt else None, df[ts_col].iloc[i])
-            for i in range(len(df))
-        ]
-        out["lotSize"] = pd.to_numeric(df[lot_col], errors="coerce").fillna(1).astype(int) if lot_col else 1
-        out["expiry"] = df[exp_col].astype(str) if exp_col else None
+            # Atomic replace of DB file
+            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+            backup_path = f"{db_path}.bak"
+            try:
+                if Path(db_path).exists():
+                    Path(db_path).replace(backup_path)
+                Path(tmp_db_path).replace(db_path)
+                LOG.info("Instrument DB updated: %s", db_path)
+                if Path(backup_path).exists():
+                    Path(backup_path).unlink(missing_ok=True)
+            except Exception:
+                LOG.exception("Failed to replace DB atomically; rolling back")
+                if Path(backup_path).exists():
+                    Path(backup_path).replace(db_path)
+                raise
+        finally:
+            try:
+                Path(tmp_db_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+    finally:
+        try:
+            Path(tmp_path).unlink(missing_ok=True)
+        except Exception:
+            pass
 
-        ok_rows = (
-            out["securityId"].notna() & (out["securityId"].str.strip() != "") &
-            out["tradingSymbol"].notna() & (out["tradingSymbol"].str.strip() != "")
-        )
-        out = out[ok_rows]
 
-        if out.empty or out["tradingSymbol"].nunique() < 50000:
-            raise RuntimeError("Validation failed: too few usable rows after normalization")
-
-        tmp_path = db_path + ".tmp"
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
-
-        conn = sqlite3.connect(tmp_path)
-        out.to_sql("instruments", conn, if_exists="replace", index=False)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_tradingsymbol ON instruments(tradingSymbol)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_securityid ON instruments(securityId)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_segment ON instruments(segment)")
-        conn.execute("VACUUM")
-        conn.commit()
+def find_instrument(db_path: str, trading_symbol: str):
+    """Find a single instrument by trading symbol. Closes connection reliably."""
+    p = Path(db_path)
+    if not p.exists():
+        return None
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM instruments WHERE tradingSymbol = ? LIMIT 1", (trading_symbol,))
+        row = cur.fetchone()
+        if not row:
+            return None
+        cols = [c[0] for c in cur.description]
+        return dict(zip(cols, row))
+    finally:
         conn.close()
 
-        os.replace(tmp_path, db_path)
-        LOG.info("✅ instruments saved to %s (rows=%d)", db_path, len(out))
-        return {"status": "success", "rows": int(len(out))}
-    except Exception as e:
-        LOG.exception("❌ download_and_populate failed")
-        return {"status": "error", "message": str(e)}
 
-def cleanup_instruments(db_path: Optional[str] = None) -> Dict[str, str]:
-    db_path = db_path or DEFAULT_DB
+def resolve_symbol(db_path: str, symbol: str, segment_hint: str = "NSE_EQ"):
+    """Basic resolution wrapper; expand normalization logic as needed."""
+    return find_instrument(db_path, symbol)
+
+
+def schedule_periodic_download(db_path: str, master_url: str = MASTER_URL_COMPACT, hour: int = 8):
+    """Start a simple background thread to periodically refresh the DB (24h interval)."""
+    def runner():
+        import time
+        while True:
+            try:
+                download_and_populate(db_path, master_url=master_url)
+            except Exception:
+                LOG.exception("Periodic download failed")
+            time.sleep(24 * 3600)
+
+    t = threading.Thread(target=runner, daemon=True)
+    t.start()
+
+
+# Legacy compatibility functions for existing code
+def ensure_fresh_db(db_path: str) -> bool:
+    """Ensure instruments DB exists and is from today.
+    Returns True if a fresh download was triggered.
+    """
+    from datetime import datetime
+    if not os.path.exists(db_path):
+        download_and_populate(db_path)
+        return True
     try:
-        if os.path.exists(db_path):
-            os.remove(db_path)
-            LOG.info("🗑 Deleted %s", db_path)
-            return {"message": "DB removed"}
-        LOG.info("ℹ️ %s not present; nothing to delete", db_path)
-        return {"message": "DB not present"}
-    except Exception as e:
-        LOG.exception("❌ cleanup_instruments failed")
-        return {"message": f"cleanup failed: {e}"}
+        mtime = datetime.fromtimestamp(os.path.getmtime(db_path))
+        if mtime.date() != datetime.now().date():
+            download_and_populate(db_path)
+            return True
+    except Exception:
+        download_and_populate(db_path)
+        return True
+    return False
 
-def db_is_current(db_path: Optional[str] = None) -> bool:
-    db_path = db_path or DEFAULT_DB
+
+def db_is_current(db_path: str) -> bool:
+    """Check if database is current (from today)."""
+    from datetime import datetime
     if not os.path.exists(db_path):
         return False
     try:
@@ -172,8 +150,9 @@ def db_is_current(db_path: Optional[str] = None) -> bool:
     except Exception:
         return False
 
-# ------------- Query helpers -------------
-def symbol_search(db_path: Optional[str], query: str, segment: str, limit: int = 30) -> List[Dict[str, str | int]]:
+
+def symbol_search(db_path: str, query: str, segment: str, limit: int = 30):
+    """Search for symbols in the database."""
     if not query or not os.path.exists(db_path):
         return []
     conn = sqlite3.connect(db_path)
@@ -195,60 +174,24 @@ def symbol_search(db_path: Optional[str], query: str, segment: str, limit: int =
     finally:
         conn.close()
 
-def resolve_symbol(db_path: Optional[str], symbol: str, segment: str) -> Optional[Dict[str, str | int]]:
-    if not symbol or not os.path.exists(db_path):
-        return None
-    conn = sqlite3.connect(db_path)
+
+def cleanup_instruments(db_path: str):
+    """Clean up old instrument database."""
     try:
-        sql = """
-          SELECT securityId, tradingSymbol, segment, lotSize, expiry
-          FROM instruments
-          WHERE LOWER(tradingSymbol) = LOWER(?)
-            AND UPPER(segment) = UPPER(?)
-          LIMIT 1
-        """
-        row = conn.execute(sql, (symbol.strip(), (segment or "").strip())).fetchone()
-        if not row:
-            return None
-        cols = ["securityId", "tradingSymbol", "segment", "lotSize", "expiry"]
-        return dict(zip(cols, row))
-    finally:
-        conn.close()
+        if os.path.exists(db_path):
+            os.remove(db_path)
+            LOG.info("🗑 Deleted %s", db_path)
+            return {"message": "DB removed"}
+        LOG.info("ℹ️ %s not present; nothing to delete", db_path)
+        return {"message": "DB not present"}
+    except Exception as e:
+        LOG.exception("❌ cleanup_instruments failed")
+        return {"message": f"cleanup failed: {e}"}
 
-# ------------- Scheduler -------------
-_sched: Optional[BackgroundScheduler] = None
 
-def ensure_fresh_db(db_path: str) -> bool:
-    """
-    Ensure instruments DB exists and is from today.
-    Returns True if a fresh download was triggered.
-    """
-    from datetime import datetime
-    if not os.path.exists(db_path):
-        download_and_populate(db_path)
-        return True
-    try:
-        mtime = datetime.fromtimestamp(os.path.getmtime(db_path))
-        if mtime.date() != datetime.now().date():
-            download_and_populate(db_path)
-            return True
-    except Exception:
-        download_and_populate(db_path)
-        return True
-    return False
-
-def start_scheduler(db_path: Optional[str] = None) -> BackgroundScheduler:
-    global _sched
-    if _sched:
-        return _sched
-
-    db_path = db_path or DEFAULT_DB
-    LOG.info("⏳ Starting scheduler (IST): 08:00 download, 15:45 cleanup | db=%s", db_path)
-
-    _sched = BackgroundScheduler(timezone="Asia/Kolkata")
-    _sched.add_job(lambda: download_and_populate(db_path), "cron", hour=8, minute=0, id="download_job")
-    _sched.add_job(lambda: cleanup_instruments(db_path), "cron", hour=15, minute=45, id="cleanup_job")
-    _sched.start()
-
+def start_scheduler(db_path: str = None):
+    """Start the background scheduler for periodic downloads."""
+    if db_path is None:
+        db_path = os.getenv("INSTRUMENTS_DB", "instruments.db")
+    schedule_periodic_download(db_path)
     LOG.info("✅ Scheduler started")
-    return _sched

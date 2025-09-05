@@ -17,8 +17,19 @@ from pathlib import Path
 
 # ====== Dhan credentials (env first; fallback to current) ======
 import os
-DHAN_CLIENT_ID = os.getenv("DHAN_CLIENT_ID") or "1107860004"
-DHAN_ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN") or "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiJ9.eyJpc3MiOiJkaGFuIiwicGFydG5lcklkIjoiIiwiZXhwIjoxNzU5NDI4NjYwLCJpYXQiOjE3NTY4MzY2NjAsInRva2VuQ29uc3VtZXJUeXBlIjoiU0VMRiIsIndlYmhvb2tVcmwiOiIiLCJkaGFuQ2xpZW50SWQiOiIxMTA3ODYwMDA0In0.ItPA3IuAidky2QpjG89uD0S60ysgAURoEDhaNrirzc6e1JENEbh3rij9wRPXgDjE_1Lkoovo5Qw5cCjLevRzhg"
+DHAN_CLIENT_ID = os.getenv("DHAN_CLIENT_ID")
+DHAN_ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
+
+if not DHAN_CLIENT_ID or not DHAN_ACCESS_TOKEN:
+    LOG.error("DHAN_CLIENT_ID/DHAN_ACCESS_TOKEN missing. Set them as environment variables.")
+    # fail fast in production - uncomment to exit
+    # import sys; sys.exit(1)
+
+# Fallback to hardcoded values for development (remove in production)
+if not DHAN_CLIENT_ID:
+    DHAN_CLIENT_ID = "1107860004"
+if not DHAN_ACCESS_TOKEN:
+    DHAN_ACCESS_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiJ9.eyJpc3MiOiJkaGFuIiwicGFydG5lcklkIjoiIiwiZXhwIjoxNzU5NDI4NjYwLCJpYXQiOjE3NTY4MzY2NjAsInRva2VuQ29uc3VtZXJUeXBlIjoiU0VMRiIsIndlYmhvb2tVcmwiOiIiLCJkaGFuQ2xpZW50SWQiOiIxMTA3ODYwMDA0In0.ItPA3IuAidky2QpjG89uD0S60ysgAURoEDhaNrirzc6e1JENEbh3rij9wRPXgDjE_1Lkoovo5Qw5cCjLevRzhg"
 
 from scheduler import (
     start_scheduler,
@@ -41,6 +52,20 @@ from orders import (
     init_broker,
     normalize_response,
 )
+
+# Global Dhan client instance
+_DHAN_CLIENT = None
+
+def get_dhan_client():
+    """Return a configured dhanhq client instance (cached)."""
+    global _DHAN_CLIENT
+    if _DHAN_CLIENT is not None:
+        return _DHAN_CLIENT
+    if not DHAN_CLIENT_ID or not DHAN_ACCESS_TOKEN:
+        raise RuntimeError("Dhan credentials not configured")
+    # Create dhanhq client instance
+    _DHAN_CLIENT = dhanhq(client_id=DHAN_CLIENT_ID, access_token=DHAN_ACCESS_TOKEN)
+    return _DHAN_CLIENT
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
