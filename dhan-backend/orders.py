@@ -32,11 +32,49 @@ ORDTYPE_MAP = {"MARKET": "MARKET", "LIMIT": "LIMIT"}
 PRODUCT_MAP = {
     "DELIVERY": "CNC",     # Delivery -> CNC in SDK
     "CNC": "CNC",
-    # map both INTRADAY and INTRA inputs to the SDK constant 'INTRA' used in examples
-    "INTRADAY": "INTRA",
-    "INTRA": "INTRA",
+    # map both INTRADAY and INTRA inputs to the SDK constant 'INTRADAY' (SDK uses INTRADAY not INTRA)
+    "INTRADAY": "INTRADAY",
+    "INTRA": "INTRADAY",
+    # Add explicit mappings for NORMAL / NRML (carry-forward) and aliases
+    # Dhan SDK uses 'MARGIN' for carry-forward futures, not 'NORMAL'
+    "NORMAL": "MARGIN",    # carry-forward / delivery for futures (maps to SDK's MARGIN)
+    "NRML": "MARGIN",      # alias if other code uses NRML
+    "CARRY": "MARGIN",     # alias
+    "MARGIN": "MARGIN",    # direct mapping
 }
 VALIDITY_MAP = {"DAY": "DAY", "IOC": "IOC"}
+
+
+def map_product_for_sdk(requested_product: str, segment: str) -> str:
+    """
+    Map incoming product_type from webhook payload to the SDK product constant,
+    taking into account the instrument segment. Rules implemented:
+      - For FNO/MCX (futures) segment:
+          * If requested_product in ("DELIVERY","CNC","NORMAL","NRML","CARRY","MARGIN")
+            -> use 'MARGIN' (carry-forward) so user can request delivery-like behaviour
+            for futures (carry forward to expiry). SDK uses MARGIN not NORMAL.
+          * If requested_product in ("INTRADAY","INTRA") -> use 'INTRADAY'.
+      - For equity (NSE_EQ) and others:
+          * Keep standard mapping: DELIVERY/CNC -> CNC, INTRADAY -> INTRADAY
+    Returns the SDK product string expected by your place_order_via_broker.
+    """
+    if not requested_product:
+        return PRODUCT_MAP.get("INTRADAY", "INTRADAY")
+
+    rp = requested_product.strip().upper()
+    seg = (segment or "").upper()
+
+    # FUTURES/MCX: allow 'delivery' requests to mean carry-forward (MARGIN in SDK)
+    if seg in ("NSE_FNO", "MCX", "MCX_FUT", "FUT", "NSE_FUT"):
+        if rp in ("DELIVERY", "CNC", "NORMAL", "NRML", "CARRY", "MARGIN"):
+            return PRODUCT_MAP.get("NORMAL", "MARGIN")  # NORMAL maps to MARGIN
+        if rp in ("INTRADAY", "INTRA"):
+            return PRODUCT_MAP.get("INTRADAY", "INTRADAY")
+        # fallback: if unknown, default to INTRADAY
+        return PRODUCT_MAP.get(rp, PRODUCT_MAP.get("INTRADAY", "INTRADAY"))
+
+    # EQUITY or other segments: behave as before
+    return PRODUCT_MAP.get(rp, PRODUCT_MAP.get("DELIVERY", "CNC"))
 
 
 # --- Broker init ---
@@ -156,6 +194,7 @@ def place_order_via_broker(
     validity: str,
     symbol: str = "",
     disclosed_qty: int | None = 0,
+    rid: str = "N/A",
 ):
     ok, why = broker_ready()
     if not ok:
@@ -169,11 +208,26 @@ def place_order_via_broker(
             except Exception:
                 return name
 
+        # === CENTRALIZED PRODUCT MAPPING WITH FALLBACK ===
+        # Use map_product_for_sdk to normalize product_type based on segment
+        sdk_product = product_type  # default fallback
+        try:
+            sdk_product = map_product_for_sdk(product_type, segment)
+            logger.debug("(%s) Product mapping: input=%s segment=%s -> mapped=%s", rid, product_type, segment, sdk_product)
+        except Exception as e:
+            logger.warning("(%s) map_product_for_sdk failed for product_type=%s, segment=%s. Using original. err=%s", 
+                          rid, product_type, segment, str(e))
+            sdk_product = product_type or "INTRA"
+
         ex_const = _sdk_const(EX_SEG_MAP.get(segment, segment))
         tx_const = _sdk_const(SIDE_MAP.get(side, side))
         ordtype_const = _sdk_const(ORDTYPE_MAP.get(order_type, order_type))
-        prod_const = _sdk_const(PRODUCT_MAP.get(product_type, product_type))
+        prod_const = _sdk_const(PRODUCT_MAP.get(sdk_product, sdk_product))
         valid_const = _sdk_const(VALIDITY_MAP.get(validity, validity))
+        
+        # === DETAILED LOGGING ===
+        logger.info("(%s) Product mapping: product_type(in)=%s -> mapped_sdk_product=%s -> prod_const=%s | segment=%s", 
+                   rid, product_type, sdk_product, prod_const, segment)
 
         # price must always be numeric for the SDK; use 0.0 for market orders
         price_val = 0.0 if (order_type == "MARKET" or price is None) else float(price)
@@ -189,7 +243,11 @@ def place_order_via_broker(
             "price": float(price_val),
             "disclosed_quantity": int(disclosed_qty or 0),
         }
-        logger.info("Placing order: payload=%s", payload)
+        
+        # === FINAL PAYLOAD LOG (confirms exact request to broker) ===
+        logger.info("(%s) Final broker payload: symbol=%s security_id=%s segment=%s side=%s qty=%s order_type=%s product=%s price=%s", 
+                   rid, symbol, security_id, segment, side, qty, order_type, prod_const, price_val)
+        logger.debug("(%s) Complete payload: %s", rid, payload)
         try:
             return _dhan.place_order(**payload)
         except TypeError as te:

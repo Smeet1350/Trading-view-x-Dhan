@@ -27,6 +27,7 @@ from scheduler import (
     ensure_fresh_db,
 )
 from webhook import router as webhook_router
+from paper_trading import router as paper_router
 from orders import (
     broker_ready,
     get_funds,
@@ -56,22 +57,20 @@ alerts_logger = logging.getLogger("alerts")
 alerts_logger.setLevel(logging.INFO)
 alerts_logger.addHandler(handler)
 
-from config import SQLITE_PATH
+from config import SQLITE_PATH, CORS_ORIGINS
 
 app = FastAPI(title="Dhan Automation", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 app.include_router(webhook_router)
+app.include_router(paper_router)
 
 @app.middleware("http")
 async def add_request_id(request, call_next):
@@ -241,7 +240,11 @@ def api_place_order(
     lots: int = Query(0, ge=0, description="Optional: number of lots (preferred). Backend computes qty = lots * lotSize"),
     order_type: str = Query("MARKET", regex="^(MARKET|LIMIT)$"),
     price: float = Query(0.0, ge=0.0),
-    product_type: str = Query("DELIVERY", regex="^(DELIVERY|CNC|INTRADAY|INTRA)$"),
+    # Accept common product aliases including carry-forward (NORMAL/NRML/CARRY)
+    product_type: str = Query(
+        "DELIVERY",
+        regex="^(DELIVERY|CNC|INTRADAY|INTRA|NORMAL|NRML|CARRY)$"
+    ),
     validity: str = Query("DAY", regex="^(DAY|IOC)$"),
     security_id: str | None = Query(default=None, description="Optional: pass to skip DB resolve"),
     disclosed_qty: int = Query(0, ge=0),
@@ -306,14 +309,13 @@ def api_place_order(
 
     LOG.info("(%s) Final qty resolved: lots=%s lotSize=%s -> qty=%s", rid, lots, lot, computed_qty)
 
-    # If user mistakenly uses DELIVERY/CNC for FNO/MCX, override product to intraday but report it
-    forced_product = None
-    if segment in ("NSE_FNO", "MCX") and product_type in ("DELIVERY", "CNC"):
-        forced_product = "INTRADAY"
-        LOG.info("(%s) Forcing product_type %s -> %s for segment %s", rid, product_type, forced_product, segment)
-        product_type = forced_product
-
-    LOG.debug("(%s) calling place_order_via_broker sid=%s qty=%s", rid, security_id, computed_qty)
+    # === PRESERVE USER PRODUCT TYPE - delegate mapping to broker layer ===
+    # Note: map_product_for_sdk in orders.py will handle segment-specific mapping
+    if segment in ("NSE_FNO", "MCX") and product_type in ("DELIVERY", "CNC", "NORMAL", "NRML"):
+        LOG.info("(%s) Received product_type='%s' for F&O segment '%s' — preserving and delegating to broker layer for proper mapping", 
+                 rid, product_type, segment)
+    
+    LOG.debug("(%s) calling place_order_via_broker sid=%s qty=%s product_type=%s", rid, security_id, computed_qty, product_type)
     raw_res = place_order_via_broker(
         security_id=security_id,
         segment=segment,
@@ -325,6 +327,7 @@ def api_place_order(
         validity=validity,
         symbol=symbol,
         disclosed_qty=disclosed_qty,
+        rid=rid,
     )
     normalized = normalize_response(raw_res, success_msg="Order placed successfully", error_msg="Order rejected")
     elapsed = time.time() - t0
@@ -336,8 +339,6 @@ def api_place_order(
             "security_id": str(security_id), "lot": lot, "lots": int(lots or 0),
             "qty_calc": f"{lots} × {lot} = {computed_qty}" if lots else str(computed_qty)
     }
-    if forced_product:
-        preview["forced_product_type"] = forced_product
 
     return JSONResponse(content={
         "rid": rid,
@@ -359,7 +360,11 @@ def api_place_order_simple(
     qty: int = Query(..., ge=1),
     order_type: str = Query("MARKET", regex="^(MARKET|LIMIT)$"),
     price: float = Query(0.0, ge=0.0),
-    product_type: str = Query("DELIVERY", regex="^(DELIVERY|CNC|INTRADAY)$"),
+    # Accept common product aliases including carry-forward (NORMAL/NRML/CARRY)
+    product_type: str = Query(
+        "DELIVERY",
+        regex="^(DELIVERY|CNC|INTRADAY|INTRA|NORMAL|NRML|CARRY)$"
+    ),
     validity: str = Query("DAY", regex="^(DAY|IOC)$"),
 ):
     ok, why = broker_ready()
@@ -415,3 +420,43 @@ def debug_segments():
     with sqlite3.connect(SQLITE_PATH) as conn:
         rows = conn.execute("SELECT DISTINCT segment, COUNT(*) FROM instruments GROUP BY segment").fetchall()
         return [{"segment": r[0], "count": r[1]} for r in rows]
+
+@app.get("/debug/product-mapping")
+def debug_product_mapping():
+    """Test product mapping for different combinations"""
+    from orders import map_product_for_sdk
+    
+    test_cases = [
+        ("INTRADAY", "NSE_FNO"),
+        ("DELIVERY", "NSE_FNO"),
+        ("CNC", "NSE_FNO"),
+        ("NORMAL", "NSE_FNO"),
+        ("NRML", "NSE_FNO"),
+        ("INTRADAY", "NSE_EQ"),
+        ("DELIVERY", "NSE_EQ"),
+        ("CNC", "NSE_EQ"),
+        ("INTRADAY", "MCX"),
+        ("DELIVERY", "MCX"),
+    ]
+    
+    results = []
+    for product, segment in test_cases:
+        try:
+            mapped = map_product_for_sdk(product, segment)
+            status = "OK"
+            error = None
+        except Exception as e:
+            mapped = None
+            status = "ERROR"
+            error = str(e)
+        
+        results.append({
+            "input_product": product,
+            "segment": segment,
+            "mapped_product": mapped,
+            "status": status,
+            "error": error
+        })
+    
+    return {"test_cases": results}
+

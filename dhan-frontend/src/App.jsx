@@ -2,6 +2,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import axios from "axios";
 import Alerts from "./Alerts";
+import PaperTrading from "./PaperTrading";
 
 // Back-end must run here:
 const BASE_URL = import.meta.env?.VITE_API_URL || `http://${window.location.hostname}:8000`;
@@ -133,6 +134,68 @@ export default function App() {
     setSearchResults([]);
   };
 
+  // ---------- Helpers for positions / exit ----------
+  const inferSegmentFromSymbol = (sym) => {
+    const s = String(sym || "").toUpperCase();
+    if (!s) return "NSE_EQ";
+    if (s.includes("NIFTY") || s.includes("BANKNIFTY") || s.includes("FINNIFTY") || s.includes("MIDCPNIFTY")) return "NSE_FNO";
+    if (s.includes("MCX")) return "MCX";
+    if (s.includes("BSE")) return "BSE_EQ";
+    if (s.includes("NSE")) return "NSE_EQ";
+    return "NSE_FNO";
+  };
+
+  /**
+   * Called when user clicks Exit on a position/holding.
+   * Ensures we have sensible {segment, securityId, lotSize, qty, side} in exitModal before opening.
+   */
+  const handleExitClick = async (p) => {
+    try {
+      // Determine segment from several possible fields
+      const seg = p.segment ?? p.segment_type ?? p.exchangeSegment ?? p.exchange_segment ?? inferSegmentFromSymbol(p.tradingSymbol);
+      // Qty we will show in modal should be absolute
+      const qtyv = Math.abs(Number(p.netQty ?? p.quantity ?? p.qty ?? 0));
+
+      // Default modal object
+      const base = {
+        source: "position",
+        symbol: p.tradingSymbol,
+        segment: seg,
+        securityId: p.securityId ?? p.security_id ?? p.instrumentId ?? p.instrument_id ?? null,
+        lotSize: p.lotSize ?? p.lot_size ?? p.lotsize ?? null,
+        qty: qtyv,
+        side: (Number(p.netQty ?? p.quantity ?? 0) > 0) ? "SELL" : "BUY",
+        positionType: p.positionType ?? p.position_type ?? null,
+      };
+
+      // If this is already a CLOSED position or qty==0, don't allow exit
+      const isClosed = String(base.positionType || "").toUpperCase() === "CLOSED" || qtyv === 0;
+      if (isClosed) {
+        toast("Position already closed — nothing to exit.");
+        return;
+      }
+
+      // If lotSize is missing and this looks like FNO/MCX, try to resolve instrument from backend
+      if ((seg === "NSE_FNO" || seg === "MCX") && !base.lotSize) {
+        try {
+          const r = await api.get("/resolve-symbol", { params: { symbol: base.symbol, segment: seg }});
+          if (r.data && r.data.inst) {
+            base.securityId = String(r.data.inst.securityId || base.securityId || "");
+            base.lotSize = r.data.inst.lotSize ?? r.data.inst.lot_size ?? base.lotSize;
+            base.segment = r.data.inst.segment ?? base.segment;
+          }
+        } catch (e) {
+          // resolution failed — we still can open modal but warn user
+          toast("Could not resolve instrument details; backend will try symbol+segment. If exit fails, run instruments download.");
+        }
+      }
+
+      setExitModal(base);
+    } catch (e) {
+      toast("Error preparing exit: " + safeMsg(e?.message || e));
+    }
+  };
+
   const handlePlaceOrder = async (e) => {
     e.preventDefault();
     setPlacing(true);
@@ -246,6 +309,9 @@ export default function App() {
         {/* Webhook Alerts */}
         <Alerts />
 
+        {/* Paper Trading */}
+        <PaperTrading />
+
         {/* Funds */}
         <section className="card">
           <h2 className="font-semibold text-lg text-green-300">💰 Funds</h2>
@@ -285,14 +351,14 @@ export default function App() {
                     const avgCandidates = [
                       h.avgCostPrice, h.averagePrice, h.avg_price, h.avg, h.averageCost, h.avgCost
                     ];
-                    const avgRaw = avgCandidates.find(x => x !== undefined && x !== null);
-                    const avg = parseFloat(avgRaw ?? 0);
+                    const avgRaw = avgCandidates.find(x => x !== undefined && x !== null && x !== "");
+                    const avg = Number(avgRaw ?? 0) || 0;
 
                     // robust ltp candidates
-                    const ltp = parseFloat(h.lastTradedPrice ?? h.ltp ?? h.last_price ?? h.lastPrice ?? 0);
+                    const ltp = Number(h.lastTradedPrice ?? h.ltp ?? h.last_price ?? h.lastPrice ?? 0) || 0;
 
                     // qty candidates
-                    const qtyv = parseFloat(h.totalQty ?? h.quantity ?? h.qty ?? 0);
+                    const qtyv = Number(h.totalQty ?? h.quantity ?? h.qty ?? 0) || 0;
 
                     // prefer broker-provided pnl fields if available
                     const pnlProvided = (h.unrealisedPnL ?? h.unrealized_pnl ?? h.pnl ?? h.profitLoss ?? h.unrealised_pnl);
@@ -319,10 +385,11 @@ export default function App() {
                             source: "holding",
                             symbol: h.tradingSymbol,
                             segment: h.segment || "NSE_EQ",
-                            // robust securityId pick
+                            // robust securityId pick (but we'll only send it if it's a valid numeric id)
                             securityId: h.securityId ?? h.security_id ?? h.instrumentId ?? h.instrument_id ?? null,
                             qty: qtyv,
                             side: "SELL", // always sell holdings
+                            lotSize: h.lotSize ?? h.lot_size ?? null,
                           })}>
                             Exit
                           </button>
@@ -354,31 +421,30 @@ export default function App() {
                 </thead>
                 <tbody>
                   {positions.map((p, i) => {
-                    // avg fallbacks
-                    const avgCandidates = [
-                      p.buyAvg, p.avgPrice, p.avg, p.averagePrice, p.avg_price, p.avgCostPrice
-                    ];
-                    const avgRaw = avgCandidates.find(x => x !== undefined && x !== null);
-                    const avg = parseFloat(avgRaw ?? 0);
+                    // Prefer broker-provided P&L fields first (realized for closed, unrealized for open)
+                    const realized = p.realizedProfit ?? p.realized_profit ?? p.realizedPnL ?? p.realized_pnl ?? p.realized ?? null;
+                    const unreal = p.unrealisedProfit ?? p.unrealized_profit ?? p.unrealizedPnL ?? p.unrealisedPnL ?? p.unrealized ?? null;
 
-                    // ltp fallbacks
-                    const ltp = parseFloat(p.ltp ?? p.lastTradedPrice ?? p.last_price ?? p.lastPrice ?? 0);
+                    const avg = Number(p.buyAvg ?? p.avgPrice ?? p.avg ?? 0) || 0;
+                    const ltp = Number(p.ltp ?? p.lastTradedPrice ?? p.last_price ?? 0) || 0;
+                    const qtyv = Number(p.netQty ?? p.quantity ?? p.qty ?? 0) || 0;
 
-                    // qty (may be signed)
-                    const qtyv = parseFloat(p.netQty ?? p.quantity ?? p.qty ?? p.netQuantity ?? 0);
-
-                    // prefer broker-provided unrealized pnl field(s)
-                    const pnlProvided = (p.unrealisedPnL ?? p.unrealized_pnl ?? p.pnl ?? p.profitLoss ?? p.unrealised_pnl);
-                    let pnl;
-                    if (pnlProvided !== undefined && pnlProvided !== null && pnlProvided !== "") {
-                      pnl = Number(pnlProvided);
-                    } else if (!isNaN(avg) && avg !== 0) {
+                    // Determine pnl: prefer broker fields, fallback to calc when sensible
+                    let pnl = null;
+                    const positionType = (p.positionType ?? p.position_type ?? "").toString().toUpperCase();
+                    if (positionType === "CLOSED" && realized !== null) {
+                      pnl = Number(realized);
+                    } else if (unreal !== null) {
+                      pnl = Number(unreal);
+                    } else if (!isNaN(avg) && avg !== 0 && Math.abs(qtyv) > 0) {
                       pnl = (ltp - avg) * qtyv;
+                    } else if (realized !== null) {
+                      pnl = Number(realized);
                     } else {
-                      // fallback - try compute from value vs cost if fields exist, else 0
-                      const totalCost = (p.totalCost ?? p.cost ?? p.notional ?? null);
-                      pnl = totalCost ? (ltp * qtyv) - Number(totalCost) : 0;
+                      pnl = 0;
                     }
+
+                    const showExit = !(positionType === "CLOSED" || Math.abs(qtyv) === 0);
 
                     return (
                       <tr key={i} className="border-t border-gray-700">
@@ -388,16 +454,13 @@ export default function App() {
                         <td className="p-2">₹{money(ltp)}</td>
                         <td className={`p-2 ${pnl >= 0 ? "text-green-400" : "text-red-400"}`}>₹{money(pnl)}</td>
                         <td className="p-2">
-                          <button className="btn-danger" onClick={() => setExitModal({
-                            source: "position",
-                            symbol: p.tradingSymbol,
-                            segment: p.segment || "NSE_EQ",
-                            securityId: p.securityId ?? p.security_id ?? p.instrumentId ?? p.instrument_id ?? null,
-                            qty: Math.abs(qtyv),
-                            side: qtyv > 0 ? "SELL" : "BUY", // opposite to close
-                          })}>
-                            Exit
-                          </button>
+                          {showExit ? (
+                            <button className="btn-danger" onClick={() => handleExitClick(p)}>
+                              Exit
+                            </button>
+                          ) : (
+                            <span className="text-gray-400 text-sm">—</span>
+                          )}
                         </td>
                       </tr>
                     );
@@ -506,9 +569,19 @@ export default function App() {
             )}
 
             <div className="md:col-span-6 flex gap-2 mt-2">
+              {/* Product selector — show NORMAL/NRML option for F&O/MCX */}
               <select value={productType} onChange={(e)=>setProductType(e.target.value)} className="select">
-                <option value="DELIVERY">DELIVERY/CNC</option>
-                <option value="INTRADAY">INTRADAY/MIS</option>
+                { (segment === "NSE_FNO" || segment === "MCX") ? (
+                  <>
+                    <option value="NORMAL">NORMAL / NRML (carry-forward)</option>
+                    <option value="INTRADAY">INTRADAY / MIS</option>
+                  </>
+                ) : (
+                  <>
+                    <option value="DELIVERY">DELIVERY / CNC</option>
+                    <option value="INTRADAY">INTRADAY / MIS</option>
+                  </>
+                ) }
               </select>
               <select value={validity} onChange={(e)=>setValidity(e.target.value)} className="select">
                 <option value="DAY">DAY</option>
@@ -623,8 +696,17 @@ export default function App() {
                 <select className="select"
                   value={exitModal.productType || "INTRADAY"}
                   onChange={(e)=>setExitModal({...exitModal, productType: e.target.value})}>
-                  <option value="DELIVERY">DELIVERY/CNC</option>
-                  <option value="INTRADAY">INTRADAY/MIS</option>
+                  { ((exitModal.segment || segment) === "NSE_FNO" || (exitModal.segment || segment) === "MCX") ? (
+                    <>
+                      <option value="NORMAL">NORMAL / NRML (carry-forward)</option>
+                      <option value="INTRADAY">INTRADAY / MIS</option>
+                    </>
+                  ) : (
+                    <>
+                      <option value="DELIVERY">DELIVERY/CNC</option>
+                      <option value="INTRADAY">INTRADAY/MIS</option>
+                    </>
+                  ) }
                 </select>
               </div>
 
@@ -642,42 +724,59 @@ export default function App() {
             <div className="flex gap-2 justify-end mt-4">
               <button className="btn" onClick={()=>setExitModal(null)}>Cancel</button>
               <button className="btn-danger"
-                onClick={async ()=>{
+                onClick={async () => {
                   try {
-                    const secId = exitModal.securityId ?? exitModal.security_id ?? null;
+                    const baseQty = Number(exitModal.qty || 0);
+                    const seg = exitModal.segment || "NSE_EQ";
                     const params = {
                       symbol: exitModal.symbol,
-                      segment: exitModal.segment,
+                      segment: seg,
                       side: exitModal.side,
-                      qty: Number(exitModal.qty),
                       order_type: exitModal.orderType || "MARKET",
                       price: Number(exitModal.price) || 0,
                       product_type: exitModal.productType || "INTRADAY",
                       validity: exitModal.validity || "DAY",
-                      security_id: secId,
                     };
 
-                    // sanity check: require either symbol+segment or security_id
+                    // If we have lotSize for FNO/MCX prefer sending 'lots' when divisible:
+                    const lotSize = Number(exitModal.lotSize || 0);
+                    if ((seg === "NSE_FNO" || seg === "MCX") && lotSize > 0) {
+                      if (baseQty > 0 && baseQty % lotSize === 0) {
+                        params.lots = Math.abs(baseQty) / lotSize;
+                        params.qty = 0;
+                      } else {
+                        // fallback to sending qty (backend will try to resolve)
+                        params.qty = Math.abs(baseQty) || 0;
+                      }
+                    } else {
+                      params.qty = Math.abs(baseQty) || 0;
+                    }
+
+                    // Only include numeric security_id (prevents sending e.g. undefined or a text)
+                    const secCandidate = exitModal.securityId ?? exitModal.security_id ?? null;
+                    const isNumericId = secCandidate !== null && (/^\d+$/.test(String(secCandidate)));
+                    if (isNumericId) params.security_id = String(secCandidate);
+
+                    // sanity check
                     if (!params.security_id && !(params.symbol && params.segment)) {
-                      toast("❌ Exit failed: missing security_id and/or symbol info");
+                      toast("❌ Exit failed: missing symbol/segment/security info");
                       setExitModal(null);
                       return;
                     }
 
                     const res = await api.post("/order/place", null, { params });
-                    if (res.data?.status === "success") {
+                    if (res.data && res.data.status === "success") {
                       toast("✅ Square off order placed!");
-                      await fetchAll();
                       await fetchOrders();
-                      setExitModal(null);   // Close modal on success
+                      await fetchAll();
+                      setExitModal(null);
                     } else {
-                      // show server-provided message when available
-                      toast("❌ " + (res.data?.message || JSON.stringify(res.data) || "Exit failed"));
-                      setExitModal(null);   // still close modal (keeps UI consistent)
+                      toast("❌ " + (res.data?.message || safeMsg(res.data)));
+                      setExitModal(null);
                     }
                   } catch (err) {
                     toast("💥 Error placing exit: " + safeMsg(err.message || err));
-                    setExitModal(null);     // Close modal on error too
+                    setExitModal(null);
                   }
                 }}>
                 Confirm Exit
